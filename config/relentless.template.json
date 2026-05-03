@@ -1,0 +1,150 @@
+{
+  "name": "relentless-template",
+  "state_dir": ".relentless-TEMPLATE",
+  "env_files": [
+    "/ABSOLUTE/PATH/TO/env.env"
+  ],
+  "target_repo": {
+    "path": "/ABSOLUTE/PATH/TO/target-repo"
+  },
+  "command_env": {
+    "EXAMPLE_ENV_VAR": "optional value visible to diagnostics and validation commands"
+  },
+  "worker_api": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "OPENROUTER_API_KEY",
+    "model": "deepseek/deepseek-v4-pro",
+    "temperature": 0.45,
+    "max_tokens": 32768,
+    "timeout_seconds": 1800,
+    "max_retries": 3,
+    "retry_backoff_base_seconds": 20.0,
+    "skip_model_validation": true,
+    "extra_headers": {
+      "HTTP-Referer": "https://github.com/jaddai0/relentlessresearch",
+      "X-Title": "RelentlessResearch"
+    },
+    "provider_extras": {
+      "top_p": 1.0,
+      "reasoning": {
+        "effort": "high"
+      }
+    }
+  },
+  "prompt": {
+    "system": "prompts/relentless_system.md"
+  },
+  "loop": {
+    "max_iterations": 80,
+    "sleep_seconds": 3,
+    "max_recent_iterations": 3,
+    "max_observation_tail_chars": 800,
+    "max_recent_observation_chars": 6000,
+    "max_git_status_chars": 5000,
+    "max_diff_chars": 7000,
+    "run_success_checks_every": 3,
+    "stop_on_success": true
+  },
+  "external_reference_commands": {
+    "every_iterations": 0,
+    "commands": []
+  },
+  "canary_commands": {
+    "every_iterations": 3,
+    "commands": []
+  },
+  "provenance_commands": [
+    {
+      "name": "git-status",
+      "command": "git status --short",
+      "timeout_seconds": 60
+    },
+    {
+      "name": "recent-commit",
+      "command": "git log -1 --oneline",
+      "timeout_seconds": 60
+    }
+  ],
+  "compaction": {
+    "enabled": true,
+    "every_iterations": 10,
+    "prompt_checkpoints": 1,
+    "max_prompt_chars": 16000,
+    "checkpoint_recent_iterations": 24,
+    "checkpoint_result_tail_chars": 900
+  },
+  "problem": {
+    "title": "REPLACE_WITH_PROBLEM_TITLE",
+    "objective": "Describe the concrete outcome that counts as success.",
+    "known_facts": [
+      "List durable facts, paths, previous wins, and previous failures.",
+      "Include explicit instructions not to weaken validators or fake success."
+    ],
+    "initial_hypotheses": [
+      "Replace with the highest-probability root-cause class.",
+      "Replace with an independent alternate root-cause class.",
+      "Replace with an escape-hatch hypothesis that would require external reference code or sample audit."
+    ],
+    "primary_strategy": "Describe the preferred investigation strategy. For correctness bugs, prefer parity diagnostics and localization before broad rewrites."
+  },
+  "editable_globs": [
+    "src/**/*.py",
+    "scripts/**/*.py",
+    "docs/**/*.md",
+    "README.md"
+  ],
+  "context_files": [
+    "README.md",
+    "docs/relentless_problem_blueprint.md"
+  ],
+  "context_globs": [
+    "src/**/*.py",
+    "scripts/*.py"
+  ],
+  "max_context_chars_per_file": 25000,
+  "max_total_context_chars": 120000,
+  "command_policy": {
+    "allowed_prefixes": [
+      "python3 ",
+      "python ",
+      "rg ",
+      "sed ",
+      "ls ",
+      "find ",
+      "git status",
+      "git diff",
+      "git log",
+      "git show"
+    ],
+    "forbidden_substrings": [
+      "rm -rf",
+      "git reset --hard",
+      "git checkout --",
+      "pkill",
+      "kill ",
+      "OPENROUTER_API_KEY",
+      "curl ",
+      "wget ",
+      "sudo ",
+      " && ",
+      ";",
+      "|",
+      "`",
+      "$("
+    ]
+  },
+  "validation_commands": [
+    {
+      "name": "compile-or-test",
+      "command": "python3 -m py_compile src/**/*.py scripts/*.py",
+      "timeout_seconds": 120
+    }
+  ],
+  "success_commands": [
+    {
+      "name": "real-success-gate",
+      "command": "python3 scripts/replace_with_real_success_gate.py",
+      "timeout_seconds": 1200
+    }
+  ]
+}
