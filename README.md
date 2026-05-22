@@ -132,3 +132,15 @@ These are built into the template because they prevented real wasted motion:
 - Sample audits: verify that evaluation examples are not too small, ambiguous, mislabeled, or preprocessed into nonsense.
 - Streaming command progress: each phase writes `<phase>-progress.json` while commands run.
 - Frozen provenance: success freezes config, notebook, supervisor notes, hypotheses, diff, and optional provenance command output.
+
+## Mac Training Constraints Workflow
+
+Use this when the goal is faster training through better software utilization of Mac hardware.
+
+- `scripts/map_training_process.py` wraps a training command and writes a structured phase map.
+- `scripts/check_training_process_map.py` fails until the map identifies a current bottleneck with enough evidence.
+- `docs/training_profile_schema.md` defines the marker format and profile artifact.
+- `docs/mac_training_constraints_blueprint.md` captures the Theory-of-Constraints operating loop.
+- `config/mac-training-constraints.template.json` is the copyable Relentless config for phase-0 mapping.
+
+The first success gate is not a speedup. It is a trustworthy process map. Optimize only after the profile names the current constraint.

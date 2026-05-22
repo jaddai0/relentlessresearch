@@ -1,0 +1,155 @@
+{
+  "name": "mac-training-constraints",
+  "state_dir": ".relentless-training",
+  "env_files": [],
+  "target_repo": {
+    "path": "/ABSOLUTE/PATH/TO/training-repo"
+  },
+  "command_env": {},
+  "worker_api": {
+    "base_url": "https://openrouter.ai/api/v1",
+    "api_key": "OPENROUTER_API_KEY",
+    "model": "deepseek/deepseek-v4-pro",
+    "temperature": 0.35,
+    "max_tokens": 32768,
+    "timeout_seconds": 1800,
+    "max_retries": 3,
+    "retry_backoff_base_seconds": 20.0,
+    "skip_model_validation": true,
+    "extra_headers": {
+      "HTTP-Referer": "https://github.com/jaddai0/relentlessresearch",
+      "X-Title": "RelentlessResearch Mac Training Constraints"
+    },
+    "provider_extras": {
+      "top_p": 1.0,
+      "reasoning": {
+        "effort": "high"
+      }
+    }
+  },
+  "prompt": {
+    "system": "/ABSOLUTE/PATH/TO/relentlessresearch/prompts/relentless_system.md"
+  },
+  "loop": {
+    "max_iterations": 80,
+    "sleep_seconds": 3,
+    "max_recent_iterations": 3,
+    "max_observation_tail_chars": 1200,
+    "max_recent_observation_chars": 8000,
+    "max_git_status_chars": 5000,
+    "max_diff_chars": 9000,
+    "run_success_checks_every": 2,
+    "stop_on_success": false
+  },
+  "external_reference_commands": {
+    "every_iterations": 0,
+    "commands": []
+  },
+  "canary_commands": {
+    "every_iterations": 0,
+    "commands": []
+  },
+  "provenance_commands": [
+    {
+      "name": "training-process-map",
+      "command": "cat .relentless-training/profile/training_process_map.json",
+      "timeout_seconds": 30
+    },
+    {
+      "name": "git-status",
+      "command": "git status --short",
+      "timeout_seconds": 30
+    }
+  ],
+  "compaction": {
+    "enabled": true,
+    "every_iterations": 10,
+    "prompt_checkpoints": 1,
+    "max_prompt_chars": 18000,
+    "checkpoint_recent_iterations": 24,
+    "checkpoint_result_tail_chars": 1200
+  },
+  "problem": {
+    "title": "Mac training constraints program",
+    "objective": "Reduce end-to-end Mac training time by mapping the full training process, identifying the current software bottleneck, optimizing only that bottleneck, and re-measuring until the constraint moves.",
+    "known_facts": [
+      "The primary metric is lower ms_per_step or equivalent throughput. Hardware utilization is diagnostic only.",
+      "Do not count bigger batches, lower image resolution, fewer epochs, smaller models, or lower-quality settings as software utilization wins.",
+      "Phase 0 is instrumentation: produce .relentless-training/profile/training_process_map.json and pass the checker before optimizing.",
+      "Do not propose speed fixes until the current constraint is named by the profile artifact with at least medium confidence.",
+      "If a change raises utilization but does not lower wall-clock training time, it is not a win."
+    ],
+    "initial_hypotheses": [
+      "The current constraint is an avoidable synchronization or evaluation barrier.",
+      "The current constraint is memory movement from layout conversion, cache churn, or repeated encoding.",
+      "The current constraint is an unfused or poorly batched hot kernel in forward or backward.",
+      "The current constraint is host-side data loading, scheduling, checkpointing, logging, or validation.",
+      "ANE offload is only useful for a measured dominant subgraph whose transfer and dispatch costs are included."
+    ],
+    "primary_strategy": "Map first, then optimize the named current constraint. After every change, re-run the mapper and compare total wall time, phase share, and whether the bottleneck moved."
+  },
+  "editable_globs": [
+    "docs/mac_training_constraints_blueprint.md",
+    "docs/training_profile_schema.md",
+    "docs/training_command.txt",
+    "scripts/**/*.py",
+    "src/**/*.py",
+    "training/**/*.py",
+    "tests/**/*.py"
+  ],
+  "context_files": [
+    "docs/mac_training_constraints_blueprint.md",
+    "docs/training_profile_schema.md",
+    "docs/training_command.txt",
+    ".relentless-training/profile/training_process_map.json"
+  ],
+  "context_globs": [
+    "scripts/**/*.py",
+    "training/**/*.py",
+    "src/**/*.py"
+  ],
+  "max_context_chars_per_file": 30000,
+  "max_total_context_chars": 160000,
+  "command_policy": {
+    "allowed_prefixes": [
+      "python3 ",
+      "python ",
+      "rg ",
+      "sed ",
+      "ls ",
+      "find ",
+      "cat ",
+      "git status",
+      "git diff",
+      "git log",
+      "git show"
+    ],
+    "forbidden_substrings": [
+      "rm -rf",
+      "git reset --hard",
+      "git checkout --",
+      "pkill",
+      "kill ",
+      "OPENROUTER_API_KEY",
+      "curl ",
+      "wget ",
+      "sudo ",
+      "`",
+      "$("
+    ]
+  },
+  "validation_commands": [
+    {
+      "name": "map-training-process",
+      "command": "python3 /ABSOLUTE/PATH/TO/relentlessresearch/scripts/map_training_process.py --command-file docs/training_command.txt --output .relentless-training/profile/training_process_map.json --log .relentless-training/profile/training_process_map.log --timeout-seconds 1800 --min-steps 3",
+      "timeout_seconds": 1900
+    }
+  ],
+  "success_commands": [
+    {
+      "name": "training-process-map-gate",
+      "command": "python3 /ABSOLUTE/PATH/TO/relentlessresearch/scripts/check_training_process_map.py --profile .relentless-training/profile/training_process_map.json --min-steps 3 --min-phases 2 --min-confidence medium",
+      "timeout_seconds": 60
+    }
+  ]
+}
