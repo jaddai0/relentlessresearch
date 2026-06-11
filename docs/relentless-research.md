@@ -1,4 +1,9 @@
-# RelentlessResearch
+# RelentlessResearch — Legacy Batch Loop (v1)
+
+> This documents the original single-completion batch loop
+> (`scripts/relentless_research.py`). It remains the right tool for one crisp
+> correctness bug with a binary success gate. For research-oriented goals, use
+> the goal loop — see `docs/relentless-goal-loop.md`.
 
 RelentlessResearch is a persistent autonomous debugging loop for problems that need sustained investigation rather than many isolated patch attempts.
 

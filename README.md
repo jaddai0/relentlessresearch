@@ -1,146 +1,122 @@
 # RelentlessResearch
 
-RelentlessResearch is a copyable, single-workspace autonomous debugging loop for hard research problems.
+RelentlessResearch pursues complex, research-oriented goals by running **real
+agent sessions in a persistent loop** — the "loops" idea: an outer loop that owns
+the goal, gates, and memory; an inner loop that is a full agentic harness session
+with tools, web access, and self-directed context.
 
-It is built for cases where a strong model should keep investigating until a real success gate passes, while the framework supplies memory, guardrails, repeatable validation, crash containment, and a clean stop signal.
+The framework supplies what the agent must not be trusted with: a harness-owned
+goal ledger with milestones, guardrail audits that revert out-of-scope edits,
+validation gates the agent cannot weaken, a model supervisor that grades evidence
+and steers between sessions, durable memory (research notebook + structured
+hypothesis ledger), crash containment, and provenance freezing.
 
-## What You Get
+Two loops ship in this pack:
 
-- `scripts/relentless_research.py`: the runner.
-- `scripts/relentless_common.py`: the small dependency shim used by the runner.
-- `config/relentless.template.json`: copy-and-edit configuration.
-- `prompts/relentless_system.md`: model contract and JSON schema.
-- `docs/relentless-research.md`: operating notes and anti-spin rules.
-- `docs/relentless_problem_blueprint.md`: copy into the target repo for stable human guidance.
-- `docs/lessons-learned.md`: framework lessons from real runs.
-- `examples/replace_with_real_success_gate.py`: tiny example success gate.
-- `<state_dir>/hypotheses.json`: a structured hypothesis ledger created by the runner.
-- `<state_dir>/supervisor_notes.md`: fresh architect steering injected late in every prompt.
+| Loop | Entry | Use for |
+|---|---|---|
+| **Goal loop (v2, default)** | `scripts/relentless.py` | Open-ended research goals: investigations, optimizations, multi-step campaigns. Output is knowledge (reports) plus code. |
+| Legacy batch loop (v1) | `scripts/relentless_research.py` | One crisp correctness bug, a binary success gate, a tightly sandboxed single-completion model. See `docs/relentless-research.md`. |
 
-## Install
+## How the goal loop works
 
-Copy this directory anywhere. From the copied directory:
+Each iteration dispatches one full agent session (Claude Code headless or Codex
+CLI — subscription-billed local harnesses) on a **mission**:
 
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -r requirements.txt
-cp config/relentless.template.json config/relentless.my-problem.json
-```
+- **plan** — decompose the goal into 3–7 milestones with observable acceptance
+  criteria (runs first when no milestones exist, or after a `replan` verdict);
+- **work** — drive the active milestone toward its acceptance criteria;
+- **synthesize** — all milestones done: write `reports/final_report.md` judged
+  against the goal's success criteria.
 
-Put your model API key in an env file, for example:
+After every worker session the harness audits the workspace (reverts edits
+outside `editable_globs`, resets any commits), runs the gates itself, then runs a
+**read-only supervisor session** that applies the rulebook
+(`docs/lessons-learned.md`): evidence discipline, drift and repetition detection,
+milestone grading, and a verdict — `continue | steer | replan | fresh_session |
+halt`. Steering accumulates in `supervisor_notes.md`, which both the supervisor
+and humans can write and every brief includes.
 
-```text
-OPENROUTER_API_KEY=replace-with-your-key
-```
+Memory is durable and agent-curated: `research_notebook.md`, `hypotheses.json`
+(active / weak / ruled_out / proven / stale, with shared-assumption tracking),
+per-session reports, and backend session resume for warm context.
 
-Then edit `config/relentless.my-problem.json`:
+Full architecture and operating notes: `docs/relentless-goal-loop.md`.
 
-- `env_files`: absolute path to your env file.
-- `target_repo.path`: absolute path to the repo the model may inspect and edit.
-- `problem`: the durable facts, objective, and primary strategy.
-- `editable_globs`: the only files the model may edit.
-- `context_files` and `context_globs`: the context included in each prompt.
-- `validation_commands`: cheap checks that run every iteration.
-- `canary_commands`: optional behavior/sample checks that run periodically and before success checks.
-- `success_commands`: the real finish line.
-- `external_reference_commands`: optional read-only surveys of upstream implementations, forks, papers, model cards, issue threads, or vendored reference code.
-- `provenance_commands`: optional commands captured when a success artifact is frozen.
-
-Put a tailored `docs/relentless_problem_blueprint.md` in the target repo and keep it in `context_files`. Use it for durable facts, ruled-out hypotheses, and traps the model keeps falling into.
-
-## Commands
-
-Dry-run without spending model credits:
+## Quick start
 
 ```bash
-python3 scripts/relentless_research.py dry-run --config config/relentless.my-problem.json
+python3 -m venv .venv && . .venv/bin/activate
+python3 -m pip install -r requirements.txt   # only the legacy loop needs requests
+
+cp config/goal.template.json config/my-goal.json
+# edit: workspace.path, editable_globs, goal.{objective,success_criteria,context}
+
+python3 scripts/relentless.py dry-run --config config/my-goal.json  # brief + argv, no spend
+python3 scripts/relentless.py once    --config config/my-goal.json  # one session, foreground
+python3 scripts/relentless.py start   --config config/my-goal.json  # background loop
+python3 scripts/relentless.py status  --config config/my-goal.json
+python3 scripts/relentless.py report  --config config/my-goal.json
+python3 scripts/relentless.py stop    --config config/my-goal.json
 ```
 
-Run one iteration in the foreground:
+The worker backend is the `claude` CLI by default (uses your existing login and
+the target project's CLAUDE.md/skills/MCP); `codex` and `fake` (scripted, for
+tests) are also available. No API keys are needed for the default setup.
+
+## Configuring a goal
+
+The config is small because the agent finds its own context:
+
+- `goal` — objective, durable context facts, graded `success_criteria`, non-goals.
+- `milestones` — optional seed; leave empty to let session 1 plan.
+- `workspace` — repo path + `editable_globs` (empty = read/analyze-only campaign).
+- `gates` — `validation_commands` (every session), `canary` (cadence),
+  `completion_commands` (before freezing). Keep gate scripts outside
+  `editable_globs` so the worker cannot weaken them.
+- `worker` / `supervisor` — backend, model, session timeout. Keep the supervisor
+  enabled for long campaigns; it is the anti-spin mechanism.
+
+Per-milestone `verification_commands` are for genuinely binary checks; everything
+else is graded by the supervisor against acceptance criteria.
+
+## Live steering
+
+Edit `<state_dir>/supervisor_notes.md` while the loop runs — the next session
+reads it. A `halted` status means the supervisor wants a human: read the last
+`sessions/session-NNNN/verdict.json`, fix the campaign, restart.
+
+## Design rules (unchanged from day one)
+
+- The harness owns the gates; the model can never weaken validators or fake success.
+- Evidence discipline over confidence: hypothesis statuses change only with
+  command-backed evidence, and a diagnostic that shares assumptions with the
+  thing under test cannot rule it out.
+- Durable memory survives crashes, context resets, and model swaps.
+- Stop conditions are explicit: complete (frozen with provenance), halted (human
+  needed), or max sessions.
+
+## Tests
 
 ```bash
-python3 scripts/relentless_research.py once --config config/relentless.my-problem.json
+python3 -m pytest tests/ -v
 ```
 
-Start a background loop:
+The goal-loop suite includes end-to-end campaigns driven by the `fake` backend —
+planning → work → verification → synthesis → freeze — with zero token spend.
 
-```bash
-python3 scripts/relentless_research.py start --config config/relentless.my-problem.json
-```
+## Repo map
 
-Check or stop it:
-
-```bash
-python3 scripts/relentless_research.py status --config config/relentless.my-problem.json
-python3 scripts/relentless_research.py stop --config config/relentless.my-problem.json
-```
-
-Manually compact raw iteration history into a checkpoint:
-
-```bash
-python3 scripts/relentless_research.py compact --config config/relentless.my-problem.json
-```
-
-Watch logs:
-
-```bash
-tail -f .relentless-TEMPLATE/relentless.log
-```
-
-## Design Rules
-
-- Keep one persistent workspace so useful partial work accumulates.
-- Put the real quality bar in `success_commands`, not in prose.
-- Put quick behavior canaries in `canary_commands` so shallow validators cannot declare victory alone.
-- Keep validation strict. Never let the model weaken validators or fake success.
-- Feed command observations back into the next prompt.
-- Use the hypothesis ledger to mark hypotheses active, weak, stale, ruled out, or proven. A hypothesis is not ruled out if the diagnostic shared the same assumption as the suspected bug.
-- When the loop stalls, trigger an external-reference survey instead of repeatedly testing the local implementation against itself.
-- Compact long runs regularly so the model sees a distilled checkpoint plus a few fresh observations instead of a giant pile of stale diagnostics.
-- Record invalid model responses instead of crashing the loop.
-- Stop on success, freeze the artifact plus provenance, then optimize in a separate phase.
-
-## Copy Checklist
-
-1. Copy this pack.
-2. Create a project-specific config.
-3. Set a real success gate.
-4. Run `dry-run`.
-5. Run `once`.
-6. Inspect the first iteration.
-7. Start the background loop only after the first iteration looks sane.
-
-## Live Steering
-
-The runner loads config once at process start. Restart the loop after changing `context_files`, `problem.known_facts`, model settings, validation commands, or success commands.
-
-You can edit files that are already listed in `context_files` while the loop runs; the next prompt will read their latest contents. This is the safest way to add cheat sheets and blueprints mid-run.
-
-You can also edit `<state_dir>/supervisor_notes.md` while the loop runs. It is injected after ordinary context, making it the intended place for the supervising architect to steer the worker without restarting.
-
-The intended human/Codex role is supervising architect: watch for drift, weak evidence being over-interpreted, repeated failed hypotheses, and diagnostic-plumbing loops. When that happens, update the problem blueprint with concrete guidance instead of letting the worker burn iterations.
-
-## Hindsight Features
-
-These are built into the template because they prevented real wasted motion:
-
-- Independent-oracle checks: the worker must state shared assumptions for decisive diagnostics.
-- External-reference phase: configure read-only commands that inspect independent implementations when local evidence stalls.
-- Structured hypothesis ledger: preserve status, evidence, shared assumptions, and next discriminating tests.
-- Stronger fixtures/canaries: require nontrivial behavior checks outside narrow validators.
-- Sample audits: verify that evaluation examples are not too small, ambiguous, mislabeled, or preprocessed into nonsense.
-- Streaming command progress: each phase writes `<phase>-progress.json` while commands run.
-- Frozen provenance: success freezes config, notebook, supervisor notes, hypotheses, diff, and optional provenance command output.
-
-## Mac Training Constraints Workflow
-
-Use this when the goal is faster training through better software utilization of Mac hardware.
-
-- `scripts/map_training_process.py` wraps a training command and writes a structured phase map.
-- `scripts/check_training_process_map.py` fails until the map identifies a current bottleneck with enough evidence.
-- `docs/training_profile_schema.md` defines the marker format and profile artifact.
-- `docs/mac_training_constraints_blueprint.md` captures the Theory-of-Constraints operating loop.
-- `config/mac-training-constraints.template.json` is the copyable Relentless config for phase-0 mapping.
-
-The first success gate is not a speedup. It is a trustworthy process map. Optimize only after the profile names the current constraint.
+- `scripts/relentless.py` — goal loop orchestrator (v2)
+- `scripts/relentless_backends.py` — agent session backends: claude, codex, fake
+- `scripts/relentless_research.py` + `scripts/relentless_common.py` — legacy batch loop
+- `prompts/mission_system.md` / `prompts/supervisor_system.md` — v2 contracts
+- `prompts/relentless_system.md` — legacy v1 contract
+- `config/goal.template.json` — v2 template (`examples/goal-demo.json` is runnable)
+- `config/relentless.template.json` — legacy v1 template
+- `docs/relentless-goal-loop.md` — v2 architecture and operating notes
+- `docs/relentless-research.md` — legacy v1 operating notes
+- `docs/lessons-learned.md` — the rulebook; wired into the supervisor
+- `docs/superpowers/specs/2026-06-11-goal-loop-design.md` — v2 design rationale
+- Mac training constraints workflow (profiling-first): `docs/mac_training_constraints_blueprint.md`,
+  `scripts/map_training_process.py`, `scripts/check_training_process_map.py`

@@ -1,0 +1,31 @@
+{
+  "name": "goal-demo",
+  "state_dir": ".relentless-goal-demo",
+  "workspace": {
+    "path": "examples/minimal-target",
+    "editable_globs": ["**/*.md"]
+  },
+  "goal": {
+    "title": "Demo goal",
+    "objective": "Smoke-test the goal loop: characterize this tiny workspace and report on it.",
+    "context": ["This is a demo. The workspace is one README."],
+    "success_criteria": ["A final report exists describing the workspace."],
+    "non_goals": ["Editing anything outside the workspace."]
+  },
+  "milestones": [],
+  "worker": {
+    "backend": "claude",
+    "model": "sonnet",
+    "session_timeout_seconds": 600
+  },
+  "supervisor": {
+    "enabled": true,
+    "backend": "claude",
+    "model": "sonnet",
+    "session_timeout_seconds": 300
+  },
+  "loop": {
+    "max_sessions": 4,
+    "sleep_seconds": 2
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "name": "goal-template",
+  "state_dir": ".relentless-goal-TEMPLATE",
+  "env_files": [],
+  "workspace": {
+    "path": "/ABSOLUTE/PATH/TO/target-repo",
+    "editable_globs": [
+      "src/**/*.py",
+      "scripts/**/*.py",
+      "docs/**/*.md"
+    ]
+  },
+  "goal": {
+    "title": "REPLACE_WITH_GOAL_TITLE",
+    "objective": "The research goal in one or two sentences. Open-ended is fine — milestones make it concrete.",
+    "context": [
+      "Durable facts the campaign should never re-derive: paths, prior wins, prior failures, hardware constraints.",
+      "Explicit instruction examples: never weaken validators, never fake success."
+    ],
+    "success_criteria": [
+      "Graded statements the final synthesis is judged against, e.g. 'we can name the current bottleneck with command-backed evidence'.",
+      "Another criterion."
+    ],
+    "non_goals": [
+      "Things the loop should record but not chase."
+    ]
+  },
+  "milestones": [],
+  "worker": {
+    "backend": "claude",
+    "model": "opus",
+    "permission_mode": "acceptEdits",
+    "session_timeout_seconds": 3600,
+    "resume_sessions": true,
+    "extra_args": []
+  },
+  "supervisor": {
+    "enabled": true,
+    "backend": "claude",
+    "model": "sonnet",
+    "session_timeout_seconds": 900,
+    "rulebook": "docs/lessons-learned.md"
+  },
+  "gates": {
+    "validation_commands": [],
+    "canary": {
+      "every_sessions": 3,
+      "commands": []
+    },
+    "completion_commands": []
+  },
+  "loop": {
+    "max_sessions": 40,
+    "sleep_seconds": 5,
+    "recent_session_rollup": 6,
+    "stop_on_complete": true
+  }
+}
