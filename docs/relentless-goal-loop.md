@@ -22,8 +22,8 @@ the goal ledger, gates, guardrail audits, supervision, and provenance.
 
 | Layer | Owns |
 |---|---|
-| Worker session (claude/codex) | Exploration, experiments, edits, evidence, notebook + hypothesis ledger updates, session report, outcome proposal |
-| Supervisor session (read-only) | Evidence discipline, drift/repetition detection, milestone grading, plan health, steering notes, continue/steer/replan/fresh_session/halt |
+| Worker session (claude/codex) | Exploration, experiments, edits, evidence, notebook + hypothesis/reasoning-state updates, session report, outcome proposal |
+| Supervisor session (read-only) | Evidence discipline, reasoning-state hygiene, drift/repetition detection, milestone grading, plan health, steering notes, continue/steer/replan/fresh_session/halt |
 | Harness (this repo) | Goal ledger, mission selection, briefs, guardrail audit, gates, verdict application, provenance freeze, crash containment, daemon |
 | Human | Writes the goal config; reads reports; may steer any time via `supervisor_notes.md`; handles `halted` |
 
@@ -58,6 +58,42 @@ The worker runs with full tools in the workspace (`cwd`) plus the state dir
 Empty `editable_globs` means a read/analyze-only campaign: every workspace edit
 is reverted.
 
+## Evidence provenance (observations are verified, not trusted)
+
+Two mechanisms keep the worker's observations honest — both extend the same
+principle as the gates ("results come from the harness, so the worker cannot
+fake them") from success-checking to evidence-gathering:
+
+1. **Transcripts.** Worker sessions run with `--output-format stream-json`, and
+   the full event stream — every tool call and tool result — is saved to
+   `sessions/session-NNNN/worker-transcript.jsonl`. The supervisor is pointed
+   at it and instructed to verify the session's most decisive claim against
+   the transcript, not against the worker's prose.
+2. **Evidence replay.** The worker can declare up to 5 `evidence_commands` in
+   its outcome's `reasoning_state` — the exact commands that reproduce its
+   decisive observations. The harness re-runs them after the session (all of
+   them; exit codes are observations, not pass/fail) and stamps the logs under
+   `sessions/session-NNNN/gates/`. Reasoning-state entries record
+   `observation_source: "harness"` when replay ran and `"worker"` when the
+   observation exists only as self-report; the supervisor treats worker-only
+   decisive observations as weak evidence.
+
+## Pre-registered next tests (interpretations are graded against commitments)
+
+`next_discriminating_test` is an object, not a string:
+
+```json
+{"test": "...", "expected_if_confirmed": "...", "expected_if_refuted": "..."}
+```
+
+Because it is recorded at the end of session N — before session N+1 runs — it
+works as a pre-registration. Session N+1's brief surfaces it ("run this first,
+or say why not"), and the supervisor grades N+1's chosen test and
+interpretation against the expectations committed in N. The same-session
+`expected_observation`/`actual_observation` pair is written after the output
+was seen and proves nothing by itself; the cross-session commitment is the one
+that counts. Legacy plain-string values are still accepted and normalized.
+
 ## State dir anatomy
 
 ```
@@ -65,13 +101,25 @@ is reverted.
   goal_state.json        harness-owned: objective, milestones, findings, status
   research_notebook.md   agent-curated durable memory
   hypotheses.json        structured hypothesis ledger (active/weak/ruled_out/proven/stale)
+  reasoning_state.json   structured problem-state ledger (facts, unknowns,
+                         hypotheses, tests, observations, updates)
   supervisor_notes.md    steering channel — supervisor appends, humans may too
   agent_session.json     backend resume id (continuity across sessions)
   sessions/session-NNNN/ brief.md, outcome.json, result.json, verdict.json,
-                         audit.json, gates/, quarantine/
+                         audit.json, worker-transcript.jsonl (full tool-call
+                         stream), gates/ (incl. evidence-replay logs), quarantine/
   reports/               session-NNNN.md per session, final_report.md at the end
   frozen/<timestamp>/    provenance freeze on completion
 ```
+
+`reasoning_state.json` is the canonical "how the problem currently looks" file.
+Each worker outcome should include a `reasoning_state` block with known facts,
+unknowns, candidate hypotheses (with their shared assumptions), chosen test,
+expected observation, actual observation (verbatim from real output), belief
+update, `evidence_commands` for harness replay, and a pre-registered
+`next_discriminating_test` with expected outcomes. The harness appends it to
+history — stamping `observation_source` and the replay logs — and exposes the
+file to the next worker and supervisor.
 
 ## Commands
 

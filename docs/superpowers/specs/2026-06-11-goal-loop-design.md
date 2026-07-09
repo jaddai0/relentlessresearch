@@ -100,6 +100,8 @@ tests/test_goal_loop.py         unit tests + fake-backend end-to-end test
   goal_state.json          harness-owned goal ledger
   research_notebook.md     agent-curated durable memory
   hypotheses.json          structured hypothesis ledger (v1 schema)
+  reasoning_state.json     structured problem-state ledger: known facts,
+                           unknowns, hypotheses, tests, observations, updates
   supervisor_notes.md      steering channel (supervisor + human)
   agent_session.json       backend resume id
   status.json / relentless.pid / relentless.log
@@ -113,7 +115,9 @@ tests/test_goal_loop.py         unit tests + fake-backend end-to-end test
 
 `outcome.json` (worker-written): `schema, mission, summary, milestone_id,
 milestone_status_proposal, proposed_milestones[], findings[], open_questions[],
-report_path, goal_complete, notes_for_next_session`.
+reasoning_state{known_facts[], unknowns[], candidate_hypotheses[], chosen_test,
+expected_observation, actual_observation, belief_update,
+next_discriminating_test}, report_path, goal_complete, notes_for_next_session`.
 
 Verdict (supervisor final message, JSON): `schema, assessment, drift_detected,
 rule_violations[], milestone_updates[{id,status,reason}],

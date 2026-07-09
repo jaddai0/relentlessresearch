@@ -30,16 +30,22 @@ CLI — subscription-billed local harnesses) on a **mission**:
   against the goal's success criteria.
 
 After every worker session the harness audits the workspace (reverts edits
-outside `editable_globs`, resets any commits), runs the gates itself, then runs a
-**read-only supervisor session** that applies the rulebook
-(`docs/lessons-learned.md`): evidence discipline, drift and repetition detection,
-milestone grading, and a verdict — `continue | steer | replan | fresh_session |
-halt`. Steering accumulates in `supervisor_notes.md`, which both the supervisor
-and humans can write and every brief includes.
+outside `editable_globs`, resets any commits), replays the worker's declared
+`evidence_commands` so decisive observations are harness-stamped rather than
+self-reported, runs the gates itself, then runs a **read-only supervisor
+session** that applies the rulebook (`docs/lessons-learned.md`): evidence
+discipline, decisive-claim audit against the session transcript,
+pre-registration adherence, drift and repetition detection, milestone grading,
+and a verdict — `continue | steer | replan | fresh_session | halt`. Steering
+accumulates in `supervisor_notes.md`, which both the supervisor and humans can
+write and every brief includes.
 
 Memory is durable and agent-curated: `research_notebook.md`, `hypotheses.json`
 (active / weak / ruled_out / proven / stale, with shared-assumption tracking),
-per-session reports, and backend session resume for warm context.
+`reasoning_state.json` (known facts, unknowns, hypotheses, chosen tests,
+observations with provenance, belief updates, and pre-registered next
+discriminating tests with expected outcomes), per-session reports, full worker
+transcripts, and backend session resume for warm context.
 
 Full architecture and operating notes: `docs/relentless-goal-loop.md`.
 
@@ -86,12 +92,22 @@ Edit `<state_dir>/supervisor_notes.md` while the loop runs — the next session
 reads it. A `halted` status means the supervisor wants a human: read the last
 `sessions/session-NNNN/verdict.json`, fix the campaign, restart.
 
-## Design rules (unchanged from day one)
+## Design rules
 
 - The harness owns the gates; the model can never weaken validators or fake success.
 - Evidence discipline over confidence: hypothesis statuses change only with
   command-backed evidence, and a diagnostic that shares assumptions with the
   thing under test cannot rule it out.
+- Observations are verified, not trusted: worker sessions leave a full tool-call
+  transcript, decisive observations are replayed and stamped by the harness
+  (`evidence_commands` → `observation_source`), and the supervisor audits the
+  most decisive claim against the transcript instead of the worker's prose.
+- Interpretations are graded against pre-registrations: the next discriminating
+  test is committed with `expected_if_confirmed`/`expected_if_refuted` one
+  session before it runs, and the supervisor flags deviations and retro-fitting.
+- Problem-state discipline over loose chain of thought: each session records the
+  current facts, unknowns, hypothesis set, selected test, observation, update,
+  and pre-registered next discriminating test in `reasoning_state.json`.
 - Durable memory survives crashes, context resets, and model swaps.
 - Stop conditions are explicit: complete (frozen with provenance), halted (human
   needed), or max sessions.

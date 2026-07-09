@@ -154,6 +154,10 @@ def hypotheses_path(config: dict[str, Any]) -> Path:
     return state_dir(config) / "hypotheses.json"
 
 
+def reasoning_state_path(config: dict[str, Any]) -> Path:
+    return state_dir(config) / "reasoning_state.json"
+
+
 def supervisor_notes_path(config: dict[str, Any]) -> Path:
     return state_dir(config) / "supervisor_notes.md"
 
@@ -257,6 +261,15 @@ def initial_notebook(config: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def initial_reasoning_state() -> dict[str, Any]:
+    return {
+        "schema": "relentless-reasoning-state-v1",
+        "updated_at": utc_now(),
+        "latest": None,
+        "history": [],
+    }
+
+
 def initial_supervisor_notes() -> str:
     return (
         "# Supervisor Notes\n\n"
@@ -278,6 +291,8 @@ def ensure_layout(config: dict[str, Any]) -> None:
             hypotheses_path(config),
             {"schema": "relentless-hypotheses-v1", "updated_at": utc_now(), "hypotheses": []},
         )
+    if not reasoning_state_path(config).exists():
+        write_json(reasoning_state_path(config), initial_reasoning_state())
     if not supervisor_notes_path(config).exists():
         write_text(supervisor_notes_path(config), initial_supervisor_notes())
 
@@ -431,6 +446,23 @@ def build_brief(
         lines.append("")
         lines.append("## Open questions")
         lines.extend(f"- {item}" for item in goal_state["open_questions"])
+    prereg = preregistered_next_test(config) if mission == "work" else None
+    if prereg is not None:
+        lines.extend(
+            [
+                "",
+                f"## Pre-registered next test (committed in session {prereg['session']})",
+                f"- Test: {prereg['test']}",
+            ]
+        )
+        if prereg["expected_if_confirmed"]:
+            lines.append(f"- Expected if confirmed: {prereg['expected_if_confirmed']}")
+        if prereg["expected_if_refuted"]:
+            lines.append(f"- Expected if refuted: {prereg['expected_if_refuted']}")
+        lines.append(
+            "- Run this first, or state in your report why the campaign should deviate. "
+            "The supervisor grades your chosen test and interpretation against this commitment."
+        )
     lines.extend(
         [
             "",
@@ -443,6 +475,7 @@ def build_brief(
             "## Durable memory (read these yourself)",
             f"- Notebook: {notebook_path(config)}",
             f"- Hypothesis ledger: {hypotheses_path(config)}",
+            f"- Reasoning state: {reasoning_state_path(config)}",
             f"- Session reports: {reports_dir(config)}",
             f"- Goal state (read-only for you): {goal_state_path(config)}",
             "",
@@ -563,6 +596,8 @@ def run_gate_commands(
     commands: list[dict[str, Any]],
     sdir: Path,
     phase: str,
+    *,
+    stop_on_failure: bool = True,
 ) -> tuple[list[dict[str, Any]], bool]:
     results = []
     env = command_env(config)
@@ -582,10 +617,38 @@ def run_gate_commands(
         tail = Path(result["log_path"]).read_text(errors="replace")[-2000:]
         result["tail"] = tail
         results.append(result)
-        if result["returncode"] != 0:
+        if result["returncode"] != 0 and stop_on_failure:
             break
     passed = all(int(item.get("returncode", 1)) == 0 for item in results)
     return results, passed
+
+
+MAX_EVIDENCE_COMMANDS = 5
+
+
+def evidence_commands_from_outcome(outcome: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Worker-declared commands that reproduce its decisive observations.
+
+    The harness replays these after the session so the observation on record is
+    harness-stamped instead of self-reported. Exit codes are observations here,
+    not pass/fail — a failing test is often exactly the evidence.
+    """
+    reasoning = (outcome or {}).get("reasoning_state")
+    if not isinstance(reasoning, dict):
+        return []
+    commands: list[dict[str, Any]] = []
+    for item in list(reasoning.get("evidence_commands") or [])[:MAX_EVIDENCE_COMMANDS]:
+        if isinstance(item, str) and item.strip():
+            commands.append({"name": f"evidence-{len(commands) + 1}", "command": item.strip()})
+        elif isinstance(item, dict) and str(item.get("command") or "").strip():
+            commands.append(
+                {
+                    "name": str(item.get("name") or f"evidence-{len(commands) + 1}"),
+                    "command": str(item["command"]).strip(),
+                    "timeout_seconds": item.get("timeout_seconds"),
+                }
+            )
+    return commands
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +688,7 @@ def run_worker_session(
         env=command_env(config),
         session_dir=str(sdir),
         state_dir=str(state_dir(config)),
+        artifact_prefix="worker",
     )
     result = backend.run(request)
     write_json(
@@ -636,6 +700,7 @@ def run_worker_session(
             "error": result.error,
             "resumed_from": resume_id,
             "text_tail": result.text[-4000:],
+            "transcript_path": result.transcript_path,
         },
     )
     if worker.get("resume_sessions"):
@@ -672,17 +737,37 @@ def supervisor_user_prompt(
         "",
         "Harness gate results (authoritative — the worker cannot influence these):",
         json.dumps(gate_summary, indent=2),
+    ]
+    prereg = preregistered_next_test(config)
+    if prereg is not None:
+        lines += [
+            "",
+            f"Pre-registered next test, committed in session {prereg['session']} BEFORE this session ran.",
+            "Grade this session's chosen test and interpretation against it — a deviation needs a",
+            "stated reason, and an interpretation that ignores the committed expectations is retro-fitting:",
+            json.dumps(prereg, indent=2),
+        ]
+    lines += [
         "",
         "Files to read as needed:",
         f"- Rulebook: {config['supervisor']['rulebook']}",
         f"- Mission brief: {sdir / 'brief.md'}",
         f"- Worker outcome: {sdir / 'outcome.json'}",
+    ]
+    transcript = sdir / "worker-transcript.jsonl"
+    if transcript.exists():
+        lines.append(
+            f"- Worker transcript (authoritative log of the worker's tool calls and outputs — "
+            f"verify at least the most decisive claim against this, not against the worker's prose): {transcript}"
+        )
+    lines += [
         f"- Goal state: {goal_state_path(config)}",
         f"- Notebook: {notebook_path(config)}",
         f"- Hypothesis ledger: {hypotheses_path(config)}",
+        f"- Reasoning state: {reasoning_state_path(config)}",
         f"- Supervisor notes so far: {supervisor_notes_path(config)}",
         f"- Session reports dir: {reports_dir(config)}",
-        f"- Gate logs: {sdir / 'gates'}",
+        f"- Gate and evidence-replay logs: {sdir / 'gates'}",
         "",
         "Return exactly one relentless-verdict-v2 JSON object as your final message.",
     ]
@@ -709,6 +794,7 @@ def run_supervisor(
         env=command_env(config),
         session_dir=str(sdir),
         state_dir=str(state_dir(config)),
+        artifact_prefix="supervisor",
     )
     result = backend.run(request)
     if not result.ok:
@@ -773,6 +859,128 @@ def apply_milestone_updates(goal_state: dict[str, Any], updates: list[dict[str, 
     return applied
 
 
+def normalize_next_test(value: Any) -> dict[str, Any]:
+    """Pre-registered next test. Accepts the legacy plain string or the v2
+    object whose expected outcomes are committed BEFORE the test runs, so the
+    next session's interpretation can be graded against a real prediction
+    instead of a retro-fitted one."""
+    if isinstance(value, dict):
+        return {
+            "test": str(value.get("test") or ""),
+            "expected_if_confirmed": str(value.get("expected_if_confirmed") or ""),
+            "expected_if_refuted": str(value.get("expected_if_refuted") or ""),
+        }
+    return {
+        "test": "" if value is None else str(value),
+        "expected_if_confirmed": "",
+        "expected_if_refuted": "",
+    }
+
+
+def normalize_reasoning_state(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    list_fields = ("known_facts", "unknowns", "candidate_hypotheses", "evidence_commands")
+    text_fields = (
+        "chosen_test",
+        "expected_observation",
+        "actual_observation",
+        "belief_update",
+    )
+    normalized: dict[str, Any] = {}
+    for key in list_fields:
+        if key not in value:
+            continue
+        items = value.get(key)
+        if items is None:
+            normalized[key] = []
+        elif isinstance(items, list):
+            normalized[key] = items
+        else:
+            normalized[key] = [items]
+    for key in text_fields:
+        if key in value:
+            normalized[key] = "" if value[key] is None else str(value[key])
+    if "next_discriminating_test" in value:
+        normalized["next_discriminating_test"] = normalize_next_test(value["next_discriminating_test"])
+    extras = {
+        key: item
+        for key, item in value.items()
+        if key not in normalized and key not in (*list_fields, *text_fields, "next_discriminating_test")
+    }
+    if extras:
+        normalized["extra"] = extras
+    return normalized or None
+
+
+def record_reasoning_state(
+    config: dict[str, Any],
+    session: int,
+    mission: str,
+    milestone: dict[str, Any] | None,
+    outcome: dict[str, Any] | None,
+    evidence_results: list[dict[str, Any]] | None = None,
+) -> None:
+    reasoning = normalize_reasoning_state((outcome or {}).get("reasoning_state"))
+    if reasoning is None:
+        return
+    evidence = [
+        {
+            "name": item.get("name"),
+            "command": item.get("command"),
+            "returncode": item.get("returncode"),
+            "log_path": item.get("log_path"),
+            "tail": str(item.get("tail") or "")[-2000:],
+        }
+        for item in (evidence_results or [])
+    ]
+    # Provenance of the observation on record: "harness" means the decisive
+    # commands were replayed by the harness and their output is on disk;
+    # "worker" means the observation exists only as the worker's self-report.
+    reasoning["observation_source"] = "harness" if evidence else "worker"
+    data = read_json(reasoning_state_path(config), default=None)
+    if not isinstance(data, dict) or data.get("schema") != "relentless-reasoning-state-v1":
+        data = initial_reasoning_state()
+    entry = {
+        "session": session,
+        "mission": mission,
+        "milestone_id": milestone["id"] if milestone else (outcome or {}).get("milestone_id"),
+        "recorded_at": utc_now(),
+        "reasoning_state": reasoning,
+    }
+    if evidence:
+        entry["evidence"] = evidence
+    data.setdefault("history", []).append(entry)
+    data["latest"] = {
+        "session": entry["session"],
+        "mission": entry["mission"],
+        "milestone_id": entry["milestone_id"],
+        "recorded_at": entry["recorded_at"],
+        **reasoning,
+    }
+    data["updated_at"] = utc_now()
+    write_json(reasoning_state_path(config), data)
+
+
+def preregistered_next_test(config: dict[str, Any]) -> dict[str, Any] | None:
+    """The previous session's committed next test, if any.
+
+    Because it is recorded before the upcoming session runs, it works as a
+    pre-registration: the next worker is expected to run it (or say why the
+    campaign should deviate), and the supervisor grades the interpretation
+    against the expectations committed here — not against a story written
+    after the output was seen.
+    """
+    data = read_json(reasoning_state_path(config), default=None)
+    latest = data.get("latest") if isinstance(data, dict) else None
+    if not isinstance(latest, dict):
+        return None
+    next_test = normalize_next_test(latest.get("next_discriminating_test"))
+    if not next_test["test"].strip():
+        return None
+    return {"session": latest.get("session"), **next_test}
+
+
 def record_findings(goal_state: dict[str, Any], session: int, mission: str, milestone: dict[str, Any] | None, outcome: dict[str, Any] | None) -> None:
     entry = {
         "session": session,
@@ -815,6 +1023,7 @@ def freeze_completion(config: dict[str, Any], goal_state: dict[str, Any], sessio
     for name, source in (
         ("research_notebook.md", notebook_path(config)),
         ("hypotheses.json", hypotheses_path(config)),
+        ("reasoning_state.json", reasoning_state_path(config)),
         ("supervisor_notes.md", supervisor_notes_path(config)),
         ("final_report.md", reports_dir(config) / "final_report.md"),
     ):
@@ -910,6 +1119,19 @@ def run_session(config: dict[str, Any], worker_backend: Backend, supervisor_back
         canary_results, canary_ok = run_gate_commands(config, list(canary["commands"]), sdir, "canary")
         gate_summary["canary"] = {"passed": canary_ok, "results": [{k: r[k] for k in ("name", "returncode")} for r in canary_results]}
 
+    # Evidence replay: re-run the worker's declared decisive commands so the
+    # observations on record are harness-stamped, not self-reported. All
+    # commands run (no stop-on-failure) because a nonzero exit is often the
+    # observation itself.
+    evidence_results: list[dict[str, Any]] = []
+    evidence_commands = evidence_commands_from_outcome(outcome)
+    if evidence_commands:
+        evidence_results, _ = run_gate_commands(config, evidence_commands, sdir, "evidence", stop_on_failure=False)
+        gate_summary["evidence"] = {
+            "note": "harness replay of worker-declared evidence commands; exit codes are observations, not pass/fail",
+            "results": [{k: r[k] for k in ("name", "returncode")} for r in evidence_results],
+        }
+
     verification_ok = None
     proposal = str((outcome or {}).get("milestone_status_proposal") or "")
     if mission == "work" and milestone is not None and proposal == "done" and milestone.get("verification_commands"):
@@ -931,6 +1153,7 @@ def run_session(config: dict[str, Any], worker_backend: Backend, supervisor_back
             print(f"[{utc_now()}] session {session}: supervisor verdict unavailable — continuing with worker proposals", flush=True)
 
     goal_state = load_goal_state(config)
+    record_reasoning_state(config, session, mission, milestone, outcome, evidence_results)
     record_findings(goal_state, session, mission, milestone, outcome)
 
     action = "continue"

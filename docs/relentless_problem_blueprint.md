@@ -48,6 +48,19 @@ Use diagnostics that localize the failure before broad rewrites.
 2. Replace with a narrow component-level parity test.
 3. Replace with a small reversible patch only after a diagnostic supports it.
 
+## Reasoning State
+
+Keep `<state_dir>/reasoning_state.json` sharp enough that a fresh worker can
+resume without guessing:
+
+- known facts: supportable facts, not impressions
+- unknowns: questions that still change the next decision
+- candidate hypotheses: claims with support and a discriminating test
+- chosen test: the current highest-information action
+- observation: what actually happened this session
+- belief update: what changed because of that observation
+- next discriminating test: the next move if the goal is not complete
+
 ## Independent Oracle Plan
 
 - List independent implementations, forks, issue threads, papers, model cards, or reference scripts worth consulting.

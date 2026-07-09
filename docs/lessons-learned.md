@@ -75,4 +75,8 @@ This file captures framework lessons discovered while running hard problems. Kee
 - Give the model a short list of ruled-out hypotheses and a short list of next best experiments.
 - Prefer diagnostics that isolate the first wrong numerical distribution.
 - Keep success gates strict and separate from model confidence.
+- Keep `reasoning_state.json` concrete: facts should be supportable, unknowns should affect the next decision, hypotheses should name their discriminating tests, observations should come from real session evidence, and belief updates should say what changed.
+- Give every decisive observation a replayable command (`evidence_commands`) so the harness can stamp it. A decisive claim that exists only as worker prose is testimony, not evidence — the transcript and the replay logs are the record.
+- Pre-register the next test with `expected_if_confirmed` and `expected_if_refuted` committed before it runs. Deciding what refutation looks like after seeing the output invites retro-fitting; grade interpretations against the prior session's committed expectations, not the same-session expected/actual pair.
+- Apply the load-bearing test to belief updates: if the update would read the same under the opposite observation, the observation did no work and the update is narrative.
 - When progress becomes repetitive, pause or restart with a stronger blueprint rather than simply raising `max_iterations`.

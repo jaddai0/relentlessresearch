@@ -36,6 +36,7 @@ class SessionRequest:
     env: dict[str, str] | None = None
     session_dir: str | None = None
     state_dir: str | None = None
+    artifact_prefix: str | None = None  # e.g. "worker"/"supervisor" so both roles' artifacts coexist in one session dir
 
 
 @dataclass
@@ -46,6 +47,7 @@ class SessionResult:
     duration_seconds: float
     error: str | None = None
     raw_path: str | None = None
+    transcript_path: str | None = None
 
 
 class Backend:
@@ -77,21 +79,43 @@ class Backend:
         except FileNotFoundError as exc:
             return 127, "", str(exc), time.time() - start, f"backend binary not found: {argv[0]}"
 
+    def _artifact_name(self, request: SessionRequest, suffix: str) -> str:
+        return f"{request.artifact_prefix or self.name}-{suffix}"
+
     def _write_raw(self, request: SessionRequest, payload: dict[str, Any]) -> str | None:
         if not request.session_dir:
             return None
-        raw_path = Path(request.session_dir) / f"{self.name}-raw.json"
+        raw_path = Path(request.session_dir) / self._artifact_name(request, "raw.json")
         write_json(raw_path, payload)
         return str(raw_path)
 
+    def _write_transcript(self, request: SessionRequest, stream: str) -> str | None:
+        """Persist the backend's event stream as the session transcript.
+
+        The transcript is the authoritative record of what the agent actually
+        ran and saw — the supervisor audits decisive claims against it instead
+        of trusting the agent's self-reported observations.
+        """
+        if not request.session_dir or not stream.strip():
+            return None
+        path = Path(request.session_dir) / self._artifact_name(request, "transcript.jsonl")
+        write_text(path, stream)
+        return str(path)
+
 
 class ClaudeBackend(Backend):
-    """Claude Code headless: `claude -p --output-format json`."""
+    """Claude Code headless: `claude -p --output-format stream-json --verbose`.
+
+    stream-json (not plain json) is deliberate: the event stream contains every
+    tool call and tool result of the session, and it is saved to the session
+    dir as the transcript so observations can be verified rather than trusted.
+    """
 
     name = "claude"
 
     def build_argv(self, request: SessionRequest) -> list[str]:
-        argv = ["claude", "-p", request.prompt, "--output-format", "json"]
+        # -p with stream-json requires --verbose.
+        argv = ["claude", "-p", request.prompt, "--output-format", "stream-json", "--verbose"]
         if request.model:
             argv += ["--model", request.model]
         if request.resume_id:
@@ -112,25 +136,39 @@ class ClaudeBackend(Backend):
     def run(self, request: SessionRequest) -> SessionResult:
         argv = self.build_argv(request)
         returncode, stdout, stderr, duration, error = self._execute(argv, request)
+        transcript_path = self._write_transcript(request, stdout)
         payload: dict[str, Any] = {
             "argv_head": argv[:1] + ["<prompt omitted>"] + argv[3:],
             "returncode": returncode,
             "stderr_tail": stderr[-4000:],
+            "transcript_path": transcript_path,
         }
         text = stdout
         session_id = None
-        if error is None:
+        result_event: dict[str, Any] | None = None
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
             try:
-                data = json.loads(stdout)
-                payload["result_meta"] = {key: data.get(key) for key in ("subtype", "is_error", "num_turns", "total_cost_usd", "session_id")}
-                text = str(data.get("result") or "")
-                session_id = data.get("session_id")
-                if returncode != 0 or data.get("is_error"):
-                    error = f"claude session reported failure (subtype={data.get('subtype')}, rc={returncode})"
-            except (json.JSONDecodeError, TypeError):
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event.get("session_id"), str) and event["session_id"]:
+                session_id = session_id or event["session_id"]
+            if event.get("type") == "result":
+                result_event = event
+        if error is None:
+            if result_event is not None:
+                payload["result_meta"] = {key: result_event.get(key) for key in ("subtype", "is_error", "num_turns", "total_cost_usd", "session_id")}
+                text = str(result_event.get("result") or "")
+                session_id = result_event.get("session_id") or session_id
+                if returncode != 0 or result_event.get("is_error"):
+                    error = f"claude session reported failure (subtype={result_event.get('subtype')}, rc={returncode})"
+            else:
                 payload["stdout_tail"] = stdout[-4000:]
                 if returncode != 0:
-                    error = f"claude exited rc={returncode} with unparseable output"
+                    error = f"claude exited rc={returncode} with no result event"
         raw_path = self._write_raw(request, payload)
         return SessionResult(
             ok=error is None,
@@ -139,6 +177,7 @@ class ClaudeBackend(Backend):
             duration_seconds=duration,
             error=error,
             raw_path=raw_path,
+            transcript_path=transcript_path,
         )
 
 
@@ -200,9 +239,10 @@ class CodexBackend(Backend):
             text = self._last_message_file.read_text(errors="replace")
         if error is None and returncode != 0:
             error = f"codex exited rc={returncode}: {stderr[-1000:]}"
+        transcript_path = self._write_transcript(request, stdout)
         raw_path = self._write_raw(
             request,
-            {"returncode": returncode, "stderr_tail": stderr[-4000:], "stdout_tail": stdout[-8000:]},
+            {"returncode": returncode, "stderr_tail": stderr[-4000:], "transcript_path": transcript_path},
         )
         return SessionResult(
             ok=error is None,
@@ -211,6 +251,7 @@ class CodexBackend(Backend):
             duration_seconds=duration,
             error=error,
             raw_path=raw_path,
+            transcript_path=transcript_path,
         )
 
 
@@ -219,6 +260,7 @@ class FakeBackend(Backend):
 
     The script file holds a list of entries:
         {"text": "...", "ok": true, "session_id": "fake-1",
+         "transcript": "<optional session transcript content>",
          "files": {"{session_dir}/outcome.json": "<content>", ...}}
     Placeholders {session_dir}, {state_dir}, {workspace} are substituted at run
     time. A cursor file in the state dir makes replay survive restarts.
@@ -257,12 +299,16 @@ class FakeBackend(Backend):
 
         for raw_path, content in (entry.get("files") or {}).items():
             write_text(Path(substitute(raw_path)), substitute(str(content)))
+        transcript_path = None
+        if entry.get("transcript") is not None:
+            transcript_path = self._write_transcript(request, substitute(str(entry["transcript"])))
         return SessionResult(
             ok=bool(entry.get("ok", True)),
             text=substitute(str(entry.get("text", ""))),
             session_id=entry.get("session_id"),
             duration_seconds=0.0,
             error=entry.get("error"),
+            transcript_path=transcript_path,
         )
 
 

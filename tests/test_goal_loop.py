@@ -95,6 +95,14 @@ class TestConfigAndState:
         assert config["loop"]["max_sessions"] == 10
         assert config["gates"]["validation_commands"] == []
 
+    def test_reasoning_state_created_with_layout(self, tmp_path):
+        config = make_config(tmp_path, make_workspace(tmp_path))
+        goal_loop.ensure_layout(config)
+        state = json.loads(goal_loop.reasoning_state_path(config).read_text())
+        assert state["schema"] == "relentless-reasoning-state-v1"
+        assert state["history"] == []
+        assert state["latest"] is None
+
     def test_goal_state_planning_when_no_milestones(self, tmp_path):
         config = make_config(tmp_path, make_workspace(tmp_path))
         state = goal_loop.initial_goal_state(config)
@@ -166,6 +174,7 @@ class TestBrief:
         assert "Prove the loop works." in brief
         assert "PLANNING mission" in brief
         assert str(goal_loop.notebook_path(config)) in brief
+        assert str(goal_loop.reasoning_state_path(config)) in brief
         assert "session-0001" in brief
         assert "world domination" in brief
 
@@ -177,6 +186,156 @@ class TestBrief:
         brief = goal_loop.build_brief(config, state, 2, "work", milestone)
         assert "Active milestone: M1" in brief
         assert "x passes" in brief
+
+
+class TestReasoningState:
+    def test_run_session_records_reasoning_state_from_outcome(self, tmp_path):
+        workspace = make_workspace(tmp_path)
+        config = make_config(tmp_path, workspace)
+        reasoning_update = {
+            "known_facts": ["workspace contains src/module.py"],
+            "unknowns": ["whether the loop records reasoning state"],
+            "candidate_hypotheses": [
+                {
+                    "claim": "the harness can persist structured reasoning",
+                    "support": "outcome.json can carry arbitrary fields",
+                    "test": "run one fake session and inspect reasoning_state.json",
+                }
+            ],
+            "chosen_test": "run one fake session",
+            "expected_observation": "reasoning_state.json has one history entry",
+            "actual_observation": "fake backend wrote outcome.reasoning_state",
+            "belief_update": "structured reasoning should be durable between sessions",
+            "next_discriminating_test": "include the reasoning state in the next brief",
+        }
+        write_script(
+            Path(config["worker"]["fake_script"]),
+            [outcome_entry("plan", 1, reasoning_state=reasoning_update)],
+        )
+        goal_loop.ensure_layout(config)
+        backend = make_backend(config["worker"])
+        record = goal_loop.run_session(config, backend, None, 1)
+        assert record["outcome_present"] is True
+
+        stored = json.loads(goal_loop.reasoning_state_path(config).read_text())
+        assert stored["latest"]["known_facts"] == ["workspace contains src/module.py"]
+        assert stored["latest"]["session"] == 1
+        assert stored["history"][0]["mission"] == "plan"
+        assert stored["history"][0]["reasoning_state"]["chosen_test"] == "run one fake session"
+
+
+class TestEvidenceReplay:
+    def reasoning_with_evidence(self, evidence_commands):
+        return {
+            "known_facts": ["module defines VALUE"],
+            "unknowns": [],
+            "candidate_hypotheses": [],
+            "chosen_test": "grep the module for VALUE",
+            "actual_observation": "src/module.py line 1: VALUE = 1",
+            "belief_update": "the constant is present as expected",
+            "evidence_commands": evidence_commands,
+            "next_discriminating_test": {
+                "test": "bump VALUE and rerun the grep",
+                "expected_if_confirmed": "grep shows VALUE = 2",
+                "expected_if_refuted": "grep still shows VALUE = 1",
+            },
+        }
+
+    def test_evidence_replayed_and_observation_stamped_harness(self, tmp_path):
+        workspace = make_workspace(tmp_path)
+        config = make_config(tmp_path, workspace)
+        reasoning = self.reasoning_with_evidence(
+            [{"name": "value-check", "command": "grep -n 'VALUE = 1' src/module.py", "timeout_seconds": 10}]
+        )
+        write_script(Path(config["worker"]["fake_script"]), [outcome_entry("plan", 1, reasoning_state=reasoning)])
+        goal_loop.ensure_layout(config)
+        record = goal_loop.run_session(config, make_backend(config["worker"]), None, 1)
+
+        assert record["gates"]["evidence"]["results"][0] == {"name": "value-check", "returncode": 0}
+        stored = json.loads(goal_loop.reasoning_state_path(config).read_text())
+        entry = stored["history"][0]
+        assert entry["reasoning_state"]["observation_source"] == "harness"
+        assert entry["evidence"][0]["name"] == "value-check"
+        assert Path(entry["evidence"][0]["log_path"]).exists()
+        assert "VALUE = 1" in entry["evidence"][0]["tail"]
+        assert stored["latest"]["next_discriminating_test"]["expected_if_refuted"] == "grep still shows VALUE = 1"
+
+    def test_all_evidence_commands_run_despite_failures(self, tmp_path):
+        # A nonzero exit is an observation, not a gate failure — replay must not stop early.
+        workspace = make_workspace(tmp_path)
+        config = make_config(tmp_path, workspace)
+        reasoning = self.reasoning_with_evidence(
+            [{"name": "failing", "command": "false"}, {"name": "passing", "command": "true"}]
+        )
+        write_script(Path(config["worker"]["fake_script"]), [outcome_entry("plan", 1, reasoning_state=reasoning)])
+        goal_loop.ensure_layout(config)
+        record = goal_loop.run_session(config, make_backend(config["worker"]), None, 1)
+        results = record["gates"]["evidence"]["results"]
+        assert [r["returncode"] for r in results] == [1, 0]
+        assert record["status"] == "continue"  # evidence exit codes never fail the session
+
+    def test_observation_source_worker_without_evidence(self, tmp_path):
+        workspace = make_workspace(tmp_path)
+        config = make_config(tmp_path, workspace)
+        reasoning = self.reasoning_with_evidence([])
+        write_script(Path(config["worker"]["fake_script"]), [outcome_entry("plan", 1, reasoning_state=reasoning)])
+        goal_loop.ensure_layout(config)
+        goal_loop.run_session(config, make_backend(config["worker"]), None, 1)
+        stored = json.loads(goal_loop.reasoning_state_path(config).read_text())
+        assert stored["latest"]["observation_source"] == "worker"
+        assert "evidence" not in stored["history"][0]
+
+
+class TestPreregistration:
+    def seed_latest(self, config, next_test):
+        state = goal_loop.initial_reasoning_state()
+        state["latest"] = {"session": 3, "next_discriminating_test": next_test}
+        goal_loop.write_json(goal_loop.reasoning_state_path(config), state)
+
+    def test_legacy_string_next_test_normalized(self):
+        normalized = goal_loop.normalize_reasoning_state({"next_discriminating_test": "try X"})
+        assert normalized["next_discriminating_test"] == {
+            "test": "try X",
+            "expected_if_confirmed": "",
+            "expected_if_refuted": "",
+        }
+
+    def test_work_brief_surfaces_preregistered_test(self, tmp_path):
+        config = make_config(tmp_path, make_workspace(tmp_path))
+        goal_loop.ensure_layout(config)
+        self.seed_latest(
+            config,
+            {
+                "test": "run pytest tests/test_x.py",
+                "expected_if_confirmed": "test passes",
+                "expected_if_refuted": "assertion error at line 42",
+            },
+        )
+        milestone = {"id": "M1", "title": "t", "acceptance": "a", "status": "active", "verification_commands": []}
+        brief = goal_loop.build_brief(config, goal_loop.load_goal_state(config), 4, "work", milestone)
+        assert "Pre-registered next test (committed in session 3)" in brief
+        assert "assertion error at line 42" in brief
+        # plan missions do not carry the commitment forward
+        plan_brief = goal_loop.build_brief(config, goal_loop.load_goal_state(config), 4, "plan", None)
+        assert "Pre-registered next test" not in plan_brief
+
+    def test_supervisor_prompt_includes_commitment_and_transcript(self, tmp_path):
+        config = make_config(tmp_path, make_workspace(tmp_path))
+        goal_loop.ensure_layout(config)
+        self.seed_latest(config, {"test": "run pytest tests/test_x.py", "expected_if_confirmed": "green", "expected_if_refuted": "red"})
+        sdir = goal_loop.session_dir(config, 4)
+        sdir.mkdir(parents=True, exist_ok=True)
+        (sdir / "worker-transcript.jsonl").write_text('{"type": "result"}\n')
+        prompt = goal_loop.supervisor_user_prompt(config, 4, "work", None, None, {}, True, None)
+        assert "Pre-registered next test, committed in session 3" in prompt
+        assert "run pytest tests/test_x.py" in prompt
+        assert "worker-transcript.jsonl" in prompt
+
+    def test_no_commitment_no_section(self, tmp_path):
+        config = make_config(tmp_path, make_workspace(tmp_path))
+        goal_loop.ensure_layout(config)
+        prompt = goal_loop.supervisor_user_prompt(config, 1, "work", None, None, {}, True, None)
+        assert "Pre-registered" not in prompt
 
 
 class TestGuardrails:
@@ -274,11 +433,39 @@ class TestBackendArgv:
         )
         argv = ClaudeBackend().build_argv(request)
         assert argv[:3] == ["claude", "-p", "brief"]
-        assert "--output-format" in argv and "json" in argv
+        assert argv[argv.index("--output-format") + 1] == "stream-json"
+        assert "--verbose" in argv  # -p with stream-json requires it
         assert argv[argv.index("--model") + 1] == "opus"
         assert argv[argv.index("--resume") + 1] == "abc-123"
         assert argv[argv.index("--add-dir") + 1] == "/tmp/state"
         assert argv[argv.index("--allowedTools") + 1] == "Bash,Read"
+
+    def test_claude_stream_parsed_and_transcript_saved(self, tmp_path, monkeypatch):
+        backend = ClaudeBackend()
+        stream = "\n".join(
+            [
+                json.dumps({"type": "system", "subtype": "init", "session_id": "sess-1"}),
+                json.dumps({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "pytest -x"}}]}}),
+                json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "content": "1 failed"}]}}),
+                json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "final text", "session_id": "sess-1"}),
+            ]
+        )
+        monkeypatch.setattr(backend, "_execute", lambda argv, request: (0, stream, "", 1.0, None))
+        result = backend.run(SessionRequest(prompt="p", cwd="/tmp", session_dir=str(tmp_path), artifact_prefix="worker"))
+        assert result.ok
+        assert result.text == "final text"
+        assert result.session_id == "sess-1"
+        transcript = Path(result.transcript_path)
+        assert transcript.name == "worker-transcript.jsonl"
+        assert "pytest -x" in transcript.read_text()  # tool calls are on the record
+
+    def test_claude_stream_error_result(self, tmp_path, monkeypatch):
+        backend = ClaudeBackend()
+        stream = json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "result": "", "session_id": "s"})
+        monkeypatch.setattr(backend, "_execute", lambda argv, request: (0, stream, "", 1.0, None))
+        result = backend.run(SessionRequest(prompt="p", cwd="/tmp", session_dir=str(tmp_path)))
+        assert not result.ok
+        assert "error_max_turns" in result.error
 
     def test_claude_readonly_restricts_tools(self):
         argv = ClaudeBackend().build_argv(SessionRequest(prompt="p", cwd="/tmp", readonly=True))
