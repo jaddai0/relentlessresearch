@@ -1,0 +1,94 @@
+{
+  "name": "klein-flux2",
+  "state_dir": ".relentless-klein-flux2",
+  "workspace": {
+    "path": "/Users/dustinpainter/Dev-Projects/mlx-experiments",
+    "editable_globs": [
+      "diagnostics/klein-flux2/**",
+      "mflux/src/mflux/models/flux2/**",
+      "mflux/src/mflux/models/common/**",
+      "mflux/tests/**"
+    ]
+  },
+  "goal": {
+    "title": "Restore native MLX Klein (FLUX.2) generation in mflux",
+    "objective": "Make `mflux-generate-flux2 --model flux2-klein-4b` produce a correct, prompt-relevant image end-to-end on this machine, natively in MLX, and root-cause every failure found on the way with harness-stamped evidence. As of 2026-07-09 the command fails immediately with model resolution: \"Model not found: 'flux2-klein-4b'\" (tokenizer_loader._resolve_root_path). Prior notes (2026-06-11) also recorded deeper breakage in the flux2 inference path producing noise output, so expect the resolution failure to be the first layer, not the whole story. Work layer by layer: reproduce, root-cause, fix or precisely characterize, then advance to the next failure until the canary passes.",
+    "context": [
+      "Workspace repo: ~/Dev-Projects/mlx-experiments (formerly known as mlx-mflux; the symlink Image-models/mflux points at mlx-experiments/mflux, so edits here are visible through that path too).",
+      "Use the .venv-mlx-fork venv: `.venv-mlx-fork/bin/mflux-generate-flux2` exists there. The .venv-mlx-experimental venv has a STALE mflux install without flux2 entrypoints — do not use it, but its drift may explain older 'broken everywhere' reports.",
+      "Reproducible failing command (2026-07-09): `.venv-mlx-fork/bin/mflux-generate-flux2 --model flux2-klein-4b --prompt \"a red apple on a wooden table\" --steps 4 --seed 42 --width 256 --height 256 --output diagnostics/klein-flux2/probe.png` -> FileNotFoundError: Model not found: 'flux2-klein-4b'.",
+      "Klein base weights are NOT in ~/.cache/huggingface/hub (only FLUX.1-dev is). Klein LoRA training previously ran in this repo (training_outputs/klein9b_*, output/flux2_klein_*), so base weights existed at some point — they may have been deleted or live on an external volume. Downloading black-forest-labs/FLUX.2-klein-4B fresh is acceptable; disk and bandwidth are fine.",
+      "The flux2 module README (mflux/src/mflux/models/flux2/README.md) documents the supported models and CLI; the documented UX is the target behavior.",
+      "Klein 4B is distilled: 4 steps, guidance 1.0 is the standard fast path. Non-distilled base variants need more steps and guidance > 1.0 — do not confuse the two when judging output quality.",
+      "Independent oracle for disputed numerical evidence: Kimi K2.7 code thinking via the kimi-k2 plugin / model-gateway MCP tools available in your session. Use it to interpret parity tables, diffs, and upstream reference code blind — not to write patches. A previously used diffusers-based Klein reference venv (referred to as the MOSS venv) may exist on this machine; search for it, and if it is gone, building a minimal diffusers Klein reference in an ISOLATED new venv (e.g. diagnostics/klein-flux2/.venv-ref) is an approved and encouraged independent oracle.",
+      "Hardware: Mac Studio M3 Ultra, 512GB unified memory. After every model operation clean up: del model; gc.collect(); mx.metal.clear_cache().",
+      "mx.eval is MLX's lazy-computation materializer, not Python's eval — security linters flagging it are false positives.",
+      "Write all scratch scripts, probes, and reference outputs under diagnostics/klein-flux2/ in the workspace."
+    ],
+    "success_criteria": [
+      "Tier 1 (required): every failure encountered (model resolution, weights, deeper numerical defects) is root-caused with a reproducible command chain, and each decisive observation is harness-stamped via evidence_commands.",
+      "Tier 2 (target): the canary gate passes — `mflux-generate-flux2 --model flux2-klein-4b` produces a 256px image that the harness noise-check accepts (structured, non-uniform, non-noise).",
+      "Tier 3 (stretch): output verified prompt-relevant at 1024px, and at least one component (text encoder, a transformer block, or the VAE) numerically sanity-checked against an independent reference implementation (diffusers), with shared assumptions of the comparison stated.",
+      "Final report documents each failure layer found, its fix or precise characterization, and the exact working invocation."
+    ],
+    "non_goals": [
+      "Chroma (weights deleted, model out of date) and every other model family in the repo.",
+      "Performance optimization, quantization work, or training-pipeline changes.",
+      "Editing anything outside the editable globs; the harness reverts it.",
+      "Committing or pushing — the harness owns the git baseline and resets commits."
+    ]
+  },
+  "milestones": [],
+  "gates": {
+    "validation_commands": [
+      {
+        "name": "mflux-imports",
+        "command": ".venv-mlx-fork/bin/python -c \"import mflux; from mflux.models.flux2.flux2_initializer import *; print('flux2 imports OK')\"",
+        "timeout_seconds": 120
+      }
+    ],
+    "canary": {
+      "every_sessions": 1,
+      "commands": [
+        {
+          "name": "klein-generate",
+          "command": "mkdir -p diagnostics/klein-flux2 && .venv-mlx-fork/bin/mflux-generate-flux2 --model flux2-klein-4b --prompt \"a red apple on a wooden table\" --steps 4 --seed 42 --width 256 --height 256 --output diagnostics/klein-flux2/canary.png",
+          "timeout_seconds": 900
+        },
+        {
+          "name": "klein-not-noise",
+          "command": ".venv-mlx-fork/bin/python /Users/dustinpainter/Dev-Projects/relentless-research/scripts/image_noise_check.py diagnostics/klein-flux2/canary.png",
+          "timeout_seconds": 120
+        }
+      ]
+    },
+    "completion_commands": [
+      {
+        "name": "klein-generate-1024",
+        "command": ".venv-mlx-fork/bin/mflux-generate-flux2 --model flux2-klein-4b --prompt \"Photorealistic close-up of a hummingbird hovering near red flowers, frozen wings, detailed feathers\" --steps 4 --seed 640563507 --width 1024 --height 576 --output diagnostics/klein-flux2/final.png",
+        "timeout_seconds": 1800
+      },
+      {
+        "name": "klein-final-not-noise",
+        "command": ".venv-mlx-fork/bin/python /Users/dustinpainter/Dev-Projects/relentless-research/scripts/image_noise_check.py diagnostics/klein-flux2/final.png",
+        "timeout_seconds": 120
+      }
+    ]
+  },
+  "worker": {
+    "backend": "claude",
+    "model": "glm-5.2",
+    "session_timeout_seconds": 3600,
+    "env_files": ["config/klein-flux2-worker.env"]
+  },
+  "supervisor": {
+    "enabled": true,
+    "backend": "claude",
+    "model": "sonnet",
+    "session_timeout_seconds": 900
+  },
+  "loop": {
+    "max_sessions": 30,
+    "sleep_seconds": 10
+  }
+}

@@ -161,6 +161,19 @@ durable state is the real memory; resume is just an optimization.
   model tier below the worker, but never disable it for long campaigns — it is
   the anti-spin mechanism.
 
+### Per-role env: mixed-vendor campaigns
+
+`worker.env_files` / `worker.env` (and the supervisor equivalents) overlay the
+campaign environment for that role only, and role values OVERRIDE campaign and
+inherited values. This enables the cheap-grinder / sharp-critic split: point
+the worker's `ANTHROPIC_BASE_URL` at a subscription Anthropic-compatible
+endpoint (GLM coding plan, etc.) while the supervisor keeps the first-party
+Claude login — brains in the gates, volume on the flat fee. Gates always run
+with the plain campaign env; role overrides never leak into them. A configured
+role env file that does not exist fails the session loudly rather than
+silently running on the wrong account. See `config/klein-flux2.json` +
+`config/klein-flux2-worker.env.example` for a working example.
+
 ## The rulebook
 
 `docs/lessons-learned.md` is wired into the supervisor as its rulebook

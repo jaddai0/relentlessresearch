@@ -224,6 +224,54 @@ class TestReasoningState:
         assert stored["history"][0]["reasoning_state"]["chosen_test"] == "run one fake session"
 
 
+class TestRoleEnv:
+    def test_worker_env_file_overrides_without_touching_supervisor(self, tmp_path):
+        env_file = tmp_path / "worker.env"
+        env_file.write_text("RR_TEST_BASE_URL=http://glm.example\nRR_TEST_TOKEN='secret'\n")
+        config = make_config(
+            tmp_path,
+            make_workspace(tmp_path),
+            worker={
+                "backend": "fake",
+                "fake_script": str(tmp_path / "worker_script.json"),
+                "env_files": [str(env_file)],
+            },
+        )
+        worker_env = goal_loop.role_env(config, "worker")
+        assert worker_env["RR_TEST_BASE_URL"] == "http://glm.example"
+        assert worker_env["RR_TEST_TOKEN"] == "secret"
+        supervisor_env = goal_loop.role_env(config, "supervisor")
+        assert "RR_TEST_BASE_URL" not in supervisor_env
+
+    def test_role_env_dict_wins_over_role_env_file(self, tmp_path):
+        env_file = tmp_path / "worker.env"
+        env_file.write_text("RR_TEST_BASE_URL=http://from-file\n")
+        config = make_config(
+            tmp_path,
+            make_workspace(tmp_path),
+            worker={
+                "backend": "fake",
+                "fake_script": str(tmp_path / "worker_script.json"),
+                "env_files": [str(env_file)],
+                "env": {"RR_TEST_BASE_URL": "http://from-dict"},
+            },
+        )
+        assert goal_loop.role_env(config, "worker")["RR_TEST_BASE_URL"] == "http://from-dict"
+
+    def test_missing_role_env_file_fails_loudly(self, tmp_path):
+        config = make_config(
+            tmp_path,
+            make_workspace(tmp_path),
+            worker={
+                "backend": "fake",
+                "fake_script": str(tmp_path / "worker_script.json"),
+                "env_files": [str(tmp_path / "does-not-exist.env")],
+            },
+        )
+        with pytest.raises(Exception, match="env file does not exist"):
+            goal_loop.role_env(config, "worker")
+
+
 class TestEvidenceReplay:
     def reasoning_with_evidence(self, evidence_commands):
         return {

@@ -29,6 +29,7 @@ from relentless_common import (
     RelentlessResearchError,
     config_environment,
     extract_json_object,
+    parse_env_file,
     read_json,
     read_text,
     run_shell,
@@ -115,6 +116,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
     for settings in (worker, supervisor):
         if settings.get("fake_script"):
             settings["fake_script"] = resolve_path(root, settings["fake_script"])
+        settings["env_files"] = [value for value in (resolve_path(root, item) for item in settings.get("env_files") or []) if value]
     supervisor["rulebook"] = resolve_path(root, supervisor.get("rulebook"))
 
     prompts = config.setdefault("prompts", {})
@@ -591,6 +593,23 @@ def command_env(config: dict[str, Any]) -> dict[str, str]:
     return env
 
 
+def role_env(config: dict[str, Any], role: str) -> dict[str, str]:
+    """Environment for a session role (worker/supervisor).
+
+    Role-level `env_files` and `env` OVERRIDE the campaign environment, so the
+    two roles can run on different model endpoints — e.g. a coding-plan worker
+    (ANTHROPIC_BASE_URL pointed at a third-party Anthropic-compatible API) with
+    a first-party supervisor that keeps the default login. Gates always run
+    with the plain campaign env; role overrides never leak into them.
+    """
+    env = command_env(config)
+    settings = config.get(role) or {}
+    for env_file in settings.get("env_files") or []:
+        env.update(parse_env_file(env_file))
+    env.update({str(key): str(value) for key, value in (settings.get("env") or {}).items()})
+    return env
+
+
 def run_gate_commands(
     config: dict[str, Any],
     commands: list[dict[str, Any]],
@@ -685,7 +704,7 @@ def run_worker_session(
         permission_mode=str(worker["permission_mode"]),
         allowed_tools=list(worker.get("allowed_tools") or []),
         extra_args=list(worker.get("extra_args") or []),
-        env=command_env(config),
+        env=role_env(config, "worker"),
         session_dir=str(sdir),
         state_dir=str(state_dir(config)),
         artifact_prefix="worker",
@@ -791,7 +810,7 @@ def run_supervisor(
         timeout_seconds=int(supervisor["session_timeout_seconds"]),
         readonly=True,
         extra_args=list(supervisor.get("extra_args") or []),
-        env=command_env(config),
+        env=role_env(config, "supervisor"),
         session_dir=str(sdir),
         state_dir=str(state_dir(config)),
         artifact_prefix="supervisor",

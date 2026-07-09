@@ -32,7 +32,9 @@
     "permission_mode": "acceptEdits",
     "session_timeout_seconds": 3600,
     "resume_sessions": true,
-    "extra_args": []
+    "extra_args": [],
+    "env_files": [],
+    "env": {}
   },
   "supervisor": {
     "enabled": true,
