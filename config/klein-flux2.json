@@ -77,15 +77,16 @@
   },
   "worker": {
     "backend": "claude",
-    "model": "glm-5.2",
+    "model": "kimi-for-coding",
     "session_timeout_seconds": 3600,
-    "env_files": ["config/klein-flux2-worker.env"]
+    "env_files": ["config/klein-flux2-worker-kimi.env"]
   },
   "supervisor": {
     "enabled": true,
-    "backend": "claude",
-    "model": "sonnet",
-    "session_timeout_seconds": 900
+    "backend": "codex",
+    "model": "gpt-5.5",
+    "session_timeout_seconds": 1200,
+    "extra_args": ["-c", "model_reasoning_effort=high"]
   },
   "loop": {
     "max_sessions": 30,
