@@ -409,6 +409,26 @@ class TestGuardrails:
         assert "notes.md" in audit["reverted"]
         assert "rogue.txt" in audit["quarantined"]
 
+    def test_restores_preexisting_out_of_scope_work_instead_of_deleting_it(self, tmp_path):
+        workspace = make_workspace(tmp_path)
+        config = make_config(tmp_path, workspace)
+        goal_loop.ensure_layout(config)
+        sdir = goal_loop.session_dir(config, 1)
+        sdir.mkdir(parents=True)
+
+        (workspace / "notes.md").write_text("user tracked work\n")
+        (workspace / "user-draft.txt").write_text("user untracked work\n")
+        baseline = goal_loop.guardrail_baseline(config)
+
+        (workspace / "notes.md").write_text("worker tampering\n")
+        (workspace / "user-draft.txt").write_text("worker tampering\n")
+        audit = goal_loop.enforce_guardrails(config, sdir, baseline)
+
+        assert (workspace / "notes.md").read_text() == "user tracked work\n"
+        assert (workspace / "user-draft.txt").read_text() == "user untracked work\n"
+        assert audit["preexisting_preserved"] == ["notes.md", "user-draft.txt"]
+        assert audit["preexisting_restored"] == ["notes.md", "user-draft.txt"]
+
     def test_head_reset_on_agent_commit(self, tmp_path):
         workspace = make_workspace(tmp_path)
         config = make_config(tmp_path, workspace)

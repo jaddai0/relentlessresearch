@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -513,11 +515,96 @@ def is_path_editable(config: dict[str, Any], relative: str) -> bool:
     return False
 
 
+def path_digest(path: Path) -> str:
+    """Hash a path without following symlinks, including directory contents."""
+    digest = hashlib.sha256()
+    if path.is_symlink():
+        digest.update(b"symlink\0")
+        digest.update(os.readlink(path).encode("utf-8", "surrogateescape"))
+        return digest.hexdigest()
+    if not path.exists():
+        digest.update(b"missing\0")
+        return digest.hexdigest()
+    if path.is_file():
+        digest.update(b"file\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    digest.update(b"directory\0")
+    for root, dirnames, filenames in os.walk(path, followlinks=False):
+        root_path = Path(root)
+        dirnames.sort()
+        filenames.sort()
+        for name in [*dirnames, *filenames]:
+            child = root_path / name
+            relative = child.relative_to(path).as_posix()
+            digest.update(relative.encode("utf-8", "surrogateescape"))
+            digest.update(b"\0")
+            if child.is_symlink():
+                digest.update(b"symlink\0")
+                digest.update(os.readlink(child).encode("utf-8", "surrogateescape"))
+            elif child.is_file():
+                digest.update(b"file\0")
+                with child.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            else:
+                digest.update(b"directory\0")
+    return digest.hexdigest()
+
+
+def copy_path(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_symlink():
+        destination.symlink_to(os.readlink(source), target_is_directory=source.is_dir())
+    elif source.is_dir():
+        shutil.copytree(source, destination, symlinks=True)
+    elif source.exists():
+        shutil.copy2(source, destination)
+
+
+def remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
 def guardrail_baseline(config: dict[str, Any]) -> dict[str, Any]:
+    repo = workspace_path(config)
     head = git(["rev-parse", "HEAD"], workspace_path(config))
+    snapshot_root = Path(tempfile.mkdtemp(prefix="relentless-guardrail-"))
+    index = git(["rev-parse", "--git-path", "index"], repo)
+    index_path = Path(index.stdout.strip()) if index.returncode == 0 else None
+    if index_path is not None and not index_path.is_absolute():
+        index_path = repo / index_path
+    if index_path is not None and index_path.exists():
+        shutil.copy2(index_path, snapshot_root / "index")
+
+    preexisting: dict[str, dict[str, Any]] = {}
+    status = git(["status", "--porcelain"], repo)
+    for line in status.stdout.splitlines():
+        if not line.strip():
+            continue
+        for rel in porcelain_paths(line):
+            if is_path_editable(config, rel) or rel in preexisting:
+                continue
+            absolute = repo / rel
+            snapshot = snapshot_root / "worktree" / rel
+            copy_path(absolute, snapshot)
+            preexisting[rel] = {
+                "digest": path_digest(absolute),
+                "exists": absolute.exists() or absolute.is_symlink(),
+            }
+
     return {
         "head": head.stdout.strip() if head.returncode == 0 else None,
         "hypotheses_backup": read_json(hypotheses_path(config), default=None),
+        "snapshot_root": str(snapshot_root),
+        "index_path": str(index_path) if index_path is not None else None,
+        "preexisting": preexisting,
     }
 
 
@@ -531,13 +618,43 @@ def porcelain_paths(line: str) -> list[str]:
 
 def enforce_guardrails(config: dict[str, Any], sdir: Path, baseline: dict[str, Any]) -> dict[str, Any]:
     repo = workspace_path(config)
-    audit: dict[str, Any] = {"head_reset": False, "reverted": [], "quarantined": [], "hypotheses_restored": False}
+    audit: dict[str, Any] = {
+        "head_reset": False,
+        "index_restored": False,
+        "preexisting_preserved": sorted((baseline.get("preexisting") or {}).keys()),
+        "preexisting_restored": [],
+        "reverted": [],
+        "quarantined": [],
+        "hypotheses_restored": False,
+    }
+    snapshot_root_value = baseline.get("snapshot_root")
+    if not snapshot_root_value:
+        raise RelentlessResearchError("guardrail baseline is missing its private snapshot")
+    snapshot_root = Path(str(snapshot_root_value))
 
     head = git(["rev-parse", "HEAD"], repo)
     current_head = head.stdout.strip() if head.returncode == 0 else None
     if baseline.get("head") and current_head and current_head != baseline["head"]:
         git(["reset", "--soft", baseline["head"]], repo)
         audit["head_reset"] = True
+
+    index_path_value = baseline.get("index_path")
+    index_snapshot = snapshot_root / "index"
+    if index_path_value and index_snapshot.exists():
+        index_path = Path(str(index_path_value))
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(index_snapshot, index_path)
+        audit["index_restored"] = True
+
+    preexisting = baseline.get("preexisting") or {}
+    for rel, metadata in preexisting.items():
+        absolute = repo / rel
+        if path_digest(absolute) == metadata.get("digest"):
+            continue
+        remove_path(absolute)
+        if metadata.get("exists"):
+            copy_path(snapshot_root / "worktree" / rel, absolute)
+        audit["preexisting_restored"].append(rel)
 
     status = git(["status", "--porcelain"], repo)
     quarantine = sdir / "quarantine"
@@ -546,7 +663,7 @@ def enforce_guardrails(config: dict[str, Any], sdir: Path, baseline: dict[str, A
             continue
         code = line[:2]
         for rel in porcelain_paths(line):
-            if is_path_editable(config, rel):
+            if is_path_editable(config, rel) or rel in preexisting:
                 continue
             absolute = repo / rel
             if code.strip() == "??":
@@ -578,6 +695,8 @@ def enforce_guardrails(config: dict[str, Any], sdir: Path, baseline: dict[str, A
         audit["hypotheses_restored"] = True
 
     write_json(sdir / "audit.json", audit)
+    if snapshot_root.exists():
+        shutil.rmtree(snapshot_root)
     return audit
 
 
