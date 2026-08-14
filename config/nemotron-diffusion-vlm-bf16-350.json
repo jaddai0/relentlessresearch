@@ -13,6 +13,10 @@
       "mlx-vlm/mlx_vlm/tests/test_nemotron_diffusion_vlm.py"
     ]
   },
+  "constraint_workflow": {
+    "mode": "required",
+    "completion_stage": "promote"
+  },
   "goal": {
     "title": "Native BF16 Nemotron Diffusion VLM at 350 accepted tokens per second on M3 Ultra",
     "objective": "Port and optimize `nvidia/Nemotron-Labs-Diffusion-VLM-8B` for native MLX image-plus-text inference on this Apple M3 Ultra, then make its linear self-speculative decode path sustain a median of at least 350 accepted emitted output tokens per second on the harness-owned workload. Preserve full BF16 model, cache, activation, and draft-LoRA execution. Progress through evidence checkpoints at 150, 200, 250, 300, and 350 tok/s; do not declare success at a lower checkpoint.",

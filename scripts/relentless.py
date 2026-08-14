@@ -16,6 +16,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -82,6 +83,44 @@ LOOP_DEFAULTS: dict[str, Any] = {
     "max_supervisor_notes_chars": 8000,
 }
 
+CONSTRAINT_WORKFLOW_DEFAULTS: dict[str, Any] = {
+    "mode": "auto",
+    "completion_stage": "promote",
+}
+CONSTRAINT_MODES = {"auto", "off", "required"}
+CONSTRAINT_STAGES = {"identify": 1, "act": 2, "promote": 3}
+CONSTRAINT_KINDS = {
+    "capacity",
+    "compute",
+    "dispatch",
+    "io",
+    "memory_bandwidth",
+    "mixed",
+    "operator_coverage",
+    "synchronization",
+}
+ROOFLINE_REGIMES = {"compute", "latency", "memory", "mixed", "not_applicable"}
+MLX_TERMS = ("mlx", "metal", "apple silicon", "mac studio", "m3 ultra", "m4 ultra")
+MLX_OPTIMIZATION_TERMS = (
+    "accelerat",
+    "benchmark",
+    "bandwidth",
+    "bottleneck",
+    "compile",
+    "conversion",
+    "convert",
+    "efficien",
+    "kernel",
+    "latency",
+    "optim",
+    "performance",
+    "port",
+    "quant",
+    "speed",
+    "throughput",
+    "utilization",
+)
+
 
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -114,7 +153,19 @@ def load_config(path: str | Path) -> dict[str, Any]:
     worker = {**WORKER_DEFAULTS, **(config.get("worker") or {})}
     supervisor = {**SUPERVISOR_DEFAULTS, **(config.get("supervisor") or {})}
     loop = {**LOOP_DEFAULTS, **(config.get("loop") or {})}
+    constraint_workflow = {**CONSTRAINT_WORKFLOW_DEFAULTS, **(config.get("constraint_workflow") or {})}
+    mode = str(constraint_workflow.get("mode") or "auto")
+    completion_stage = str(constraint_workflow.get("completion_stage") or "promote")
+    if mode not in CONSTRAINT_MODES:
+        raise RelentlessResearchError(f"constraint_workflow.mode must be one of {sorted(CONSTRAINT_MODES)}")
+    if completion_stage not in CONSTRAINT_STAGES:
+        raise RelentlessResearchError(
+            f"constraint_workflow.completion_stage must be one of {sorted(CONSTRAINT_STAGES)}"
+        )
+    constraint_workflow["mode"] = mode
+    constraint_workflow["completion_stage"] = completion_stage
     config["worker"], config["supervisor"], config["loop"] = worker, supervisor, loop
+    config["constraint_workflow"] = constraint_workflow
     for settings in (worker, supervisor):
         if settings.get("fake_script"):
             settings["fake_script"] = resolve_path(root, settings["fake_script"])
@@ -160,6 +211,10 @@ def hypotheses_path(config: dict[str, Any]) -> Path:
 
 def reasoning_state_path(config: dict[str, Any]) -> Path:
     return state_dir(config) / "reasoning_state.json"
+
+
+def constraint_state_path(config: dict[str, Any]) -> Path:
+    return state_dir(config) / "mlx_constraint_state.json"
 
 
 def supervisor_notes_path(config: dict[str, Any]) -> Path:
@@ -274,6 +329,38 @@ def initial_reasoning_state() -> dict[str, Any]:
     }
 
 
+def mlx_constraint_required(config: dict[str, Any]) -> bool:
+    mode = str((config.get("constraint_workflow") or {}).get("mode") or "auto")
+    if mode == "required":
+        return True
+    if mode == "off":
+        return False
+    goal = config.get("goal") or {}
+    searchable = " ".join(
+        [
+            str(goal.get("title") or ""),
+            str(goal.get("objective") or ""),
+            *(str(item) for item in goal.get("success_criteria") or []),
+            *(str(item.get("title") or "") for item in config.get("milestones") or [] if isinstance(item, dict)),
+            *(str(item.get("acceptance") or "") for item in config.get("milestones") or [] if isinstance(item, dict)),
+        ]
+    ).lower()
+    return any(re.search(rf"\b{re.escape(term)}", searchable) for term in MLX_TERMS) and any(
+        re.search(rf"\b{re.escape(term)}", searchable) for term in MLX_OPTIMIZATION_TERMS
+    )
+
+
+def initial_constraint_state(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "relentless-mlx-constraint-state-v1",
+        "required": mlx_constraint_required(config),
+        "completion_stage": config["constraint_workflow"]["completion_stage"],
+        "updated_at": utc_now(),
+        "latest": None,
+        "history": [],
+    }
+
+
 def initial_supervisor_notes() -> str:
     return (
         "# Supervisor Notes\n\n"
@@ -297,6 +384,8 @@ def ensure_layout(config: dict[str, Any]) -> None:
         )
     if not reasoning_state_path(config).exists():
         write_json(reasoning_state_path(config), initial_reasoning_state())
+    if mlx_constraint_required(config) and not constraint_state_path(config).exists():
+        write_json(constraint_state_path(config), initial_constraint_state(config))
     if not supervisor_notes_path(config).exists():
         write_text(supervisor_notes_path(config), initial_supervisor_notes())
 
@@ -308,6 +397,178 @@ def load_goal_state(config: dict[str, Any]) -> dict[str, Any]:
 def save_goal_state(config: dict[str, Any], goal_state: dict[str, Any]) -> None:
     goal_state["updated_at"] = utc_now()
     write_json(goal_state_path(config), goal_state)
+
+
+def constraint_value(record: dict[str, Any], dotted: str) -> Any:
+    current: Any = record
+    for part in dotted.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
+
+
+def known_constraint_value(value: Any) -> bool:
+    return value is not None and (not isinstance(value, str) or value.strip().lower() not in {"", "unknown", "unverified", "unset", "todo", "tbd"})
+
+
+def validate_constraint_update(value: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    if not isinstance(value, dict):
+        return None, ["missing_constraint_update"]
+    stage = str(value.get("stage") or "")
+    record = value.get("record")
+    failures: list[str] = []
+    if stage not in CONSTRAINT_STAGES:
+        failures.append("stage_must_be_identify_act_or_promote")
+    if not isinstance(record, dict):
+        return None, [*failures, "record_must_be_an_object"]
+    if record.get("schema_version") != "mlx-toc-constraint/v1":
+        failures.append("record_schema_version_must_equal_mlx-toc-constraint/v1")
+
+    required_objects = ("workload", "goal", "baseline", "constraint", "actions", "candidate", "decision")
+    for name in required_objects:
+        if not isinstance(record.get(name), dict):
+            failures.append(f"missing_object:{name}")
+    if failures:
+        return {"stage": stage, "record": record}, failures
+
+    identify_fields = (
+        "workload.model",
+        "workload.phase",
+        "workload.hardware",
+        "workload.os",
+        "workload.runtime",
+        "workload.precision",
+        "workload.shape",
+        "workload.batch",
+        "goal.metric",
+        "goal.unit",
+        "goal.direction",
+        "goal.quality_floor",
+        "baseline.value",
+        "constraint.kind",
+        "constraint.phase",
+        "constraint.roofline_regime",
+    )
+    for field in identify_fields:
+        if not known_constraint_value(constraint_value(record, field)):
+            failures.append(f"missing_or_unknown:{field}")
+    if constraint_value(record, "goal.direction") not in {"higher", "lower"}:
+        failures.append("goal.direction_invalid")
+    if not isinstance(constraint_value(record, "baseline.value"), (int, float)) or isinstance(
+        constraint_value(record, "baseline.value"), bool
+    ):
+        failures.append("baseline.value_must_be_numeric")
+    if not isinstance(constraint_value(record, "baseline.sample_count"), int) or constraint_value(
+        record, "baseline.sample_count"
+    ) < 1:
+        failures.append("baseline.sample_count_must_be_at_least_1")
+    for field in ("baseline.evidence", "constraint.evidence"):
+        entries = constraint_value(record, field)
+        if not isinstance(entries, list) or not entries:
+            failures.append(f"missing_or_empty_list:{field}")
+    if not isinstance(constraint_value(record, "constraint.shared_assumptions"), list):
+        failures.append("constraint.shared_assumptions_must_be_a_list")
+    if constraint_value(record, "constraint.kind") not in CONSTRAINT_KINDS:
+        failures.append("constraint.kind_invalid")
+    if constraint_value(record, "constraint.roofline_regime") not in ROOFLINE_REGIMES:
+        failures.append("constraint.roofline_regime_invalid")
+
+    if CONSTRAINT_STAGES.get(stage, 0) >= CONSTRAINT_STAGES["act"]:
+        for field in ("actions.exploit", "actions.subordinate"):
+            entries = constraint_value(record, field)
+            if not isinstance(entries, list) or not entries:
+                failures.append(f"missing_or_empty_list:{field}")
+        if not isinstance(constraint_value(record, "actions.elevate"), list):
+            failures.append("actions.elevate_must_be_a_list")
+        if constraint_value(record, "actions.elevate_decision") not in {"not_yet", "rejected", "required"}:
+            failures.append("actions.elevate_decision_invalid")
+
+    if CONSTRAINT_STAGES.get(stage, 0) >= CONSTRAINT_STAGES["promote"]:
+        candidate_value = constraint_value(record, "candidate.value")
+        baseline_value = constraint_value(record, "baseline.value")
+        if not isinstance(candidate_value, (int, float)) or isinstance(candidate_value, bool):
+            failures.append("candidate.value_must_be_numeric")
+        if not isinstance(constraint_value(record, "candidate.sample_count"), int) or constraint_value(
+            record, "candidate.sample_count"
+        ) < 1:
+            failures.append("candidate.sample_count_must_be_at_least_1")
+        if constraint_value(record, "candidate.parity") not in {"PASS", "FAIL"}:
+            failures.append("candidate.parity_invalid")
+        evidence = constraint_value(record, "candidate.evidence")
+        if not isinstance(evidence, list) or not evidence:
+            failures.append("missing_or_empty_list:candidate.evidence")
+        verdict = constraint_value(record, "decision.verdict")
+        if verdict not in {"inconclusive", "promote", "reject"}:
+            failures.append("decision.verdict_invalid")
+        basis = constraint_value(record, "decision.basis")
+        if basis not in {"capability", "latency", "memory", "throughput"}:
+            failures.append("decision.basis_invalid")
+        noise_assessment = constraint_value(record, "decision.noise_assessment")
+        if noise_assessment not in {"inside_noise", "outside_noise", "not_measured"}:
+            failures.append("decision.noise_assessment_invalid")
+        if not known_constraint_value(constraint_value(record, "decision.rationale")):
+            failures.append("missing_or_unknown:decision.rationale")
+        if not known_constraint_value(record.get("next_constraint")):
+            failures.append("missing_or_unknown:next_constraint")
+        if verdict == "promote":
+            if constraint_value(record, "candidate.parity") != "PASS":
+                failures.append("promotion_requires_parity_PASS")
+            for section in ("baseline", "candidate"):
+                samples = constraint_value(record, f"{section}.sample_count")
+                if not isinstance(samples, int) or samples < 3:
+                    failures.append(f"promotion_requires_{section}_sample_count_at_least_3")
+            if basis in {"throughput", "latency"}:
+                if noise_assessment != "outside_noise":
+                    failures.append("performance_promotion_requires_outside_noise")
+                if isinstance(candidate_value, (int, float)) and isinstance(baseline_value, (int, float)):
+                    improved = candidate_value > baseline_value
+                    if constraint_value(record, "goal.direction") == "lower":
+                        improved = candidate_value < baseline_value
+                    if not improved:
+                        failures.append("promotion_does_not_improve_goal_metric")
+            elif not isinstance(constraint_value(record, "decision.accepted_tradeoffs"), list) or not constraint_value(
+                record, "decision.accepted_tradeoffs"
+            ):
+                failures.append("nonperformance_promotion_requires_accepted_tradeoffs")
+    return {"stage": stage, "record": record}, failures
+
+
+def record_constraint_update(
+    config: dict[str, Any], session: int, mission: str, outcome: dict[str, Any] | None
+) -> dict[str, Any]:
+    normalized, failures = validate_constraint_update((outcome or {}).get("constraint_update"))
+    state = read_json(constraint_state_path(config), default=None)
+    if not isinstance(state, dict) or state.get("schema") != "relentless-mlx-constraint-state-v1":
+        state = initial_constraint_state(config)
+    entry = {
+        "session": session,
+        "mission": mission,
+        "stage": (normalized or {}).get("stage"),
+        "passed": not failures,
+        "failures": failures,
+        "record": (normalized or {}).get("record"),
+        "recorded_at": utc_now(),
+    }
+    state.setdefault("history", []).append(entry)
+    state["latest"] = entry
+    state["updated_at"] = utc_now()
+    write_json(constraint_state_path(config), state)
+    return entry
+
+
+def constraint_completion_ready(config: dict[str, Any]) -> tuple[bool, list[str]]:
+    state = read_json(constraint_state_path(config), default=None)
+    latest = state.get("latest") if isinstance(state, dict) else None
+    if not isinstance(latest, dict):
+        return False, ["no_constraint_cycle_recorded"]
+    if not latest.get("passed"):
+        return False, list(latest.get("failures") or ["latest_constraint_cycle_failed"])
+    required_stage = str(config["constraint_workflow"]["completion_stage"])
+    actual_stage = str(latest.get("stage") or "")
+    if CONSTRAINT_STAGES.get(actual_stage, 0) < CONSTRAINT_STAGES[required_stage]:
+        return False, [f"completion_requires_{required_stage}_stage"]
+    return True, []
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +727,23 @@ def build_brief(
         lines.append(
             "- Run this first, or state in your report why the campaign should deviate. "
             "The supervisor grades your chosen test and interpretation against this commitment."
+        )
+    if mlx_constraint_required(config):
+        lines.extend(
+            [
+                "",
+                "## Mandatory MLX constraint workflow",
+                "- Apply Theory of Constraints as the control loop and Roofline analysis as the diagnostic.",
+                "- Freeze the workload signature and useful end-to-end metric; measure a matched baseline; identify "
+                "the current critical-path constraint; exploit it; subordinate non-constraints; elevate only after "
+                "those steps; then re-profile because the constraint may move.",
+                "- For every WORK mission, include `constraint_update` in the outcome. The harness rejects a done "
+                "proposal when that update does not pass its declared identify, act, or promote stage.",
+                f"- Constraint state: {constraint_state_path(config)}",
+                f"- Goal completion requires a passing {config['constraint_workflow']['completion_stage']} stage.",
+                "- An isolated kernel, memory, utilization, or microbenchmark gain is not a system win. Preserve "
+                "quality/parity and matched timer boundaries; report INCONCLUSIVE when the constraint is unproven.",
+            ]
         )
     lines.extend(
         [
@@ -909,6 +1187,8 @@ def supervisor_user_prompt(
         "",
         "Return exactly one relentless-verdict-v2 JSON object as your final message.",
     ]
+    if mlx_constraint_required(config):
+        lines.insert(-2, f"- MLX constraint state: {constraint_state_path(config)}")
     return "\n".join(lines)
 
 
@@ -1162,6 +1442,7 @@ def freeze_completion(config: dict[str, Any], goal_state: dict[str, Any], sessio
         ("research_notebook.md", notebook_path(config)),
         ("hypotheses.json", hypotheses_path(config)),
         ("reasoning_state.json", reasoning_state_path(config)),
+        ("mlx_constraint_state.json", constraint_state_path(config)),
         ("supervisor_notes.md", supervisor_notes_path(config)),
         ("final_report.md", reports_dir(config) / "final_report.md"),
     ):
@@ -1248,6 +1529,17 @@ def run_session(config: dict[str, Any], worker_backend: Backend, supervisor_back
 
     gates = config["gates"]
     gate_summary: dict[str, Any] = {}
+    constraint_ok = True
+    constraint_completion_ok = True
+    if mlx_constraint_required(config) and mission == "work":
+        constraint_entry = record_constraint_update(config, session, mission, outcome)
+        constraint_ok = bool(constraint_entry["passed"])
+        gate_summary["mlx_constraint"] = {
+            "passed": constraint_ok,
+            "stage": constraint_entry.get("stage"),
+            "failures": constraint_entry.get("failures") or [],
+            "state_path": str(constraint_state_path(config)),
+        }
     validation_results, validation_ok = run_gate_commands(config, list(gates.get("validation_commands") or []), sdir, "validation")
     gate_summary["validation"] = {"passed": validation_ok, "results": [{k: r[k] for k in ("name", "returncode")} for r in validation_results]}
 
@@ -1272,12 +1564,26 @@ def run_session(config: dict[str, Any], worker_backend: Backend, supervisor_back
 
     verification_ok = None
     proposal = str((outcome or {}).get("milestone_status_proposal") or "")
-    if mission == "work" and milestone is not None and proposal == "done" and milestone.get("verification_commands"):
+    if (
+        mission == "work"
+        and milestone is not None
+        and proposal == "done"
+        and constraint_ok
+        and milestone.get("verification_commands")
+    ):
         verification_results, verification_ok = run_gate_commands(config, list(milestone["verification_commands"]), sdir, "verification")
         gate_summary["verification"] = {"passed": verification_ok, "results": [{k: r[k] for k in ("name", "returncode")} for r in verification_results]}
 
     completion_ok = None
     if mission == "synthesize" and (outcome or {}).get("goal_complete"):
+        if mlx_constraint_required(config):
+            constraint_completion_ok, failures = constraint_completion_ready(config)
+            gate_summary["mlx_constraint_completion"] = {
+                "passed": constraint_completion_ok,
+                "required_stage": config["constraint_workflow"]["completion_stage"],
+                "failures": failures,
+                "state_path": str(constraint_state_path(config)),
+            }
         completion_results, completion_ok = run_gate_commands(config, list(gates.get("completion_commands") or []), sdir, "completion")
         gate_summary["completion"] = {"passed": completion_ok, "results": [{k: r[k] for k in ("name", "returncode")} for r in completion_results]}
 
@@ -1317,8 +1623,16 @@ def run_session(config: dict[str, Any], worker_backend: Backend, supervisor_back
         if (outcome or {}).get("proposed_milestones") and mission == "plan":
             applied += [f"+{m}" for m in add_proposed_milestones(goal_state, list(outcome["proposed_milestones"]))]
         if mission == "work" and milestone is not None and proposal in MILESTONE_STATUSES:
-            if proposal != "done" or verification_ok in (True, None):
+            if proposal != "done" or (constraint_ok and verification_ok in (True, None)):
                 applied += apply_milestone_updates(goal_state, [{"id": milestone["id"], "status": proposal}])
+
+    if mlx_constraint_required(config) and mission == "work" and milestone is not None and not constraint_ok:
+        current = next((item for item in goal_state.get("milestones", []) if item.get("id") == milestone["id"]), None)
+        if current is not None and current.get("status") == "done":
+            current["status"] = "active"
+            current["notes"] = "Done rejected: the mandatory MLX constraint gate did not pass."
+            current["updated_at"] = utc_now()
+            applied.append(f"{milestone['id']}->active(constraint-gate)")
 
     completed = False
     if (
@@ -1326,6 +1640,7 @@ def run_session(config: dict[str, Any], worker_backend: Backend, supervisor_back
         and (outcome or {}).get("goal_complete")
         and milestones_complete(goal_state)
         and completion_ok in (True, None)
+        and constraint_completion_ok
         and action not in ("halt", "replan")
     ):
         goal_state["status"] = "complete"

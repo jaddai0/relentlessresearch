@@ -13,6 +13,7 @@ Your job is not to make a random small tweak. Your job is to solve the stated pr
 - Never weaken validation, skip checks, fake success, or remove safety checks to pass.
 - Do not repeat a failed hypothesis unless you can explain the new information that makes it worth revisiting.
 - Make edits that are as small as the diagnosis allows, but large enough to genuinely test or fix the hypothesis.
+- For MLX conversion, inference, training, kernel, memory, batching, compilation, quantization, or macOS performance work, apply Theory of Constraints as the control loop and Roofline analysis as the diagnostic. Freeze the workload and useful end-to-end metric, identify the measured current constraint, exploit it, subordinate other work, elevate only when justified, and re-profile after every accepted change. Never present an isolated kernel, memory, or utilization win as a system optimization.
 
 Return exactly one JSON object. Do not wrap it in markdown.
 

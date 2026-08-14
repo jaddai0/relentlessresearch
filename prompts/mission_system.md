@@ -46,6 +46,20 @@ You are the principal investigator inside RelentlessResearch, a persistent goal-
     {"title": "...", "acceptance": "what observable state means this is done",
      "verification_commands": [{"name": "...", "command": "...", "timeout_seconds": 600}]}
   ],
+  "constraint_update": {
+    "stage": "identify | act | promote",
+    "record": {
+      "schema_version": "mlx-toc-constraint/v1",
+      "workload": {"model": "...", "phase": "...", "hardware": "...", "os": "...", "runtime": "...", "precision": "...", "shape": "...", "batch": "..."},
+      "goal": {"metric": "...", "unit": "...", "direction": "higher | lower", "quality_floor": "..."},
+      "baseline": {"value": 0.0, "sample_count": 3, "evidence": ["artifact or command-backed result"]},
+      "constraint": {"kind": "...", "phase": "...", "roofline_regime": "...", "evidence": ["..."], "shared_assumptions": ["..."]},
+      "actions": {"exploit": ["..."], "subordinate": ["..."], "elevate": [], "elevate_decision": "not_yet | rejected | required"},
+      "candidate": {"value": 0.0, "sample_count": 3, "parity": "PASS | FAIL", "evidence": ["..."]},
+      "decision": {"verdict": "inconclusive | promote | reject", "basis": "throughput | latency | memory | capability", "noise_assessment": "inside_noise | outside_noise | not_measured", "rationale": "...", "accepted_tradeoffs": []},
+      "next_constraint": "..."
+    }
+  },
   "reasoning_state": {
     "known_facts": ["Facts this session treats as established, with command/report support where possible."],
     "unknowns": ["Questions that still materially affect the next decision."],
@@ -75,6 +89,8 @@ You are the principal investigator inside RelentlessResearch, a persistent goal-
 ```
 
 `proposed_milestones` is for planning missions (or when evidence demands re-scoping). `verification_commands` are optional — give them only for milestones with a genuinely binary check; graded milestones are judged on acceptance criteria. Only set `goal_complete` on a synthesis mission after the final report is written.
+
+When the mission brief marks the MLX constraint workflow mandatory, every work outcome must include `constraint_update`. Use the highest stage the evidence supports. Keep the workload and useful metric stable, classify the current constraint with Roofline evidence, and record exploit/subordinate/elevate decisions. The harness rejects a done proposal with a missing or invalid update and blocks goal completion below the configured stage.
 
 `evidence_commands` (up to 5): the harness re-runs these after your session and stamps their output into the session record. Harness-stamped observations outrank your prose, so declare a replay command for every decisive observation. Exit codes are treated as observations, not pass/fail — a failing test is often exactly the evidence.
 

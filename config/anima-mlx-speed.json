@@ -1,6 +1,10 @@
 {
   "name": "anima-mlx-speed",
   "state_dir": ".relentless-anima-mlx-speed",
+  "constraint_workflow": {
+    "mode": "required",
+    "completion_stage": "promote"
+  },
   "env_files": [],
   "target_repo": {
     "path": "/Users/dustinpainter/Dev-Projects/mlx-experiments"
@@ -95,6 +99,7 @@
     "known_facts": [
       "Anima lives under mflux/src/mflux/models/anima and the local model root is /Users/dustinpainter/Dev-Projects/Image-models/circlestone-labs/Anima.",
       "The training direction is memory-aggressive: prefer resident encoded caches and reduced recomputation when safe.",
+      "Theory of Constraints is mandatory: hold the workload and quality lesson fixed, identify the measured current constraint with Roofline evidence, exploit it, subordinate other work, elevate only when justified, and re-profile after every accepted change.",
       "Do not touch unrelated dirty Z-Image or caption-script files.",
       "Do not weaken scripts/check_anima_speed_program.py or remove MLX memory guard/watchdog coverage."
     ],
@@ -103,7 +108,7 @@
       "Anima is small enough that measured mx.compile or compiled subgraphs may work even though Klein full-transformer compile did not.",
       "Further gains require attention backward/kernel work or reduced redundant mask/cast/transposition operations."
     ],
-    "primary_strategy": "Make one bounded optimization at a time, preserve the static speed gate, then use short steady-state speed probes before touching kernels."
+    "primary_strategy": "Use Theory of Constraints as the control loop: freeze the useful end-to-end metric and workload, identify the current constraint, exploit it, subordinate non-constraints, elevate only after those steps, and repeat after matched parity-preserving measurements."
   },
   "editable_globs": [
     "mflux/src/mflux/models/anima/**/*.py",

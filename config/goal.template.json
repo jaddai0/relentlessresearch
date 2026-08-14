@@ -10,6 +10,10 @@
       "docs/**/*.md"
     ]
   },
+  "constraint_workflow": {
+    "mode": "auto",
+    "completion_stage": "promote"
+  },
   "goal": {
     "title": "REPLACE_WITH_GOAL_TITLE",
     "objective": "The research goal in one or two sentences. Open-ended is fine — milestones make it concrete.",
